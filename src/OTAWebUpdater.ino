@@ -1,99 +1,120 @@
 #include <WiFi.h>
 #include <WiFiClient.h>
-#include <Webserver.h>
 #include <ESPmDNS.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+
+
 #include <Update.h>
 #include <../lib/tpl.h>
 
-const int sec = 1000;
+int TIMEOUT_START = 30;
 
-const char* host = "esp32";
-const char* ssid_start = "esp32start";
-const char* password_start ="esp32start";
-WebServer serverUpdater(8080);
+const int sec = 800;
 
-char* ssid = "esp32start";
-char* password ="esp32start";
-WebServer server(80);
+const char *host = "esp32";
+const char *ssid_start = "esp32start";
+const char *password_start = "esp32start";
 
-/*
- * setup function
- */
-void setup(void) {
-  Serial.begin(115200);
+String ssid = "esp32main";
+String password = "esp32main";
 
-	int i = 0;
+volatile int cc = 0;
 
-//   WiFi.begin(ssid_start, password_start);
-//   while ((WiFi.status() != WL_CONNECTED) && i <= 30) {
-	// i++
-//     delay(sec);
-//     Serial.print(".");
-//   }
-//   if (WiFi.status() != WL_CONNECTED) {
-//  Serial.println("Can't connect to:");
-//  Serial.println(ssid);
-//  Serial.println(password);
-//     delay(30*sec);
-//		    ESP.restart();
-// } 
-//   Serial.println("");
-//   Serial.print("Started Access Point ");
-//   Serial.println(ssid);
-//   Serial.print("IP address: ");
-//   Serial.println(WiFi.localIP());
+const int MODE_STARTUP = 0;
+const int MODE_CONFIGURED /* ??? */ = 1;
 
-  WiFi.softAP(ssid_start, password_start);
-  IPAddress IP = WiFi.softAPIP();
-  Serial.print("AP IP address: ");
-  Serial.println(IP);
+volatile byte mode = MODE_STARTUP;
 
-  /*use mdns for host name resolution*/
-  if (!MDNS.begin(host)) { //http://esp32.local
-    Serial.println("Error setting up MDNS responder!");
-    while (1) {
-      delay(sec);
-    }
-  }
-  Serial.println("mDNS responder started");
-  /*return index page which is stored in serverIndex */
-  serverUpdater.on("/", HTTP_GET, []() {
-    serverUpdater.sendHeader("Connection", "close");
-    serverUpdater.send(200, "text/html", loginIndex);
-  });
-  serverUpdater.on("/serverIndex", HTTP_GET, []() {
-    serverUpdater.sendHeader("Connection", "close");
-    serverUpdater.send(200, "text/html", serverIndex);
-  });
-  /*handling uploading firmware file */
-  serverUpdater.on("/update", HTTP_POST, []() {
-    serverUpdater.sendHeader("Connection", "close");
-    serverUpdater.send(200, "text/plain", (Update.hasError()) ? "FAIL" : "OK");
-    ESP.restart();
-  }, []() {
-    HTTPUpload& upload = serverUpdater.upload();
-    if (upload.status == UPLOAD_FILE_START) {
-      Serial.printf("Update: %s\n", upload.filename.c_str());
-      if (!Update.begin(UPDATE_SIZE_UNKNOWN)) { //start with max available size
-        Update.printError(Serial);
-      }
-    } else if (upload.status == UPLOAD_FILE_WRITE) {
-      /* flashing firmware to ESP*/
-      if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
-        Update.printError(Serial);
-      }
-    } else if (upload.status == UPLOAD_FILE_END) {
-      if (Update.end(true)) { //true to set the size to the current progress
-        Serial.printf("Update Success: %u\nRebooting...\n", upload.totalSize);
-      } else {
-        Update.printError(Serial);
-      }
-    }
-  });
-  serverUpdater.begin();
+AsyncWebServer server(80);
+
+void onRequest(AsyncWebServerRequest *request){
+  //Handle Unknown Request
+  request->send(404);
+}
+
+void onBody(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total){
+  //Handle body
+}
+
+void onUpload(AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final){
+  //Handle upload
+}
+
+void notFound(AsyncWebServerRequest *request) {
+    request->send(404, "text/plain", "Not found");
+}
+
+void setup() {
+	Serial.begin(115200);
+
+	// WiFi.mode(WIFI_AP);
+	// WiFi.softAP(host);
+	WiFi.softAP(ssid_start, password_start);
+	WiFi.softAPsetHostname(host);
+	
+	IPAddress IP = WiFi.softAPIP();
+	Serial.print("AP IP address: ");
+	Serial.println(IP);
+	
+	if (MDNS.begin(host)) {
+		Serial.println("mDNS responder started");
+	}
+
+	server.on("/", HTTP_GET, [] (AsyncWebServerRequest *request) {
+			request->redirect("/loginForm");
+	});
+
+	server.on("/stayPut", HTTP_GET, [](AsyncWebServerRequest *request) {
+		Serial.println("Staying in startup mode for 10 more minutes. Enjoy!");
+		TIMEOUT_START = 600 * sec;
+		request->redirect("/login");
+	});
+
+	// handle GET request to <host>/setCredentials?ssid=<ssid>&password=<password>
+	server.on("/setCredentials", HTTP_GET, [] (AsyncWebServerRequest *request) {
+		if (request->hasParam("ssid") && request->hasParam("password")) {
+			ssid = request->getParam("ssid")->value();
+			password = request->getParam("password")->value();
+			Serial.println(ssid + ":" + password + " credentials set");
+			request->send(200, "text/plain", ssid + ":" + password + " credentials set");
+			// request->redirect("/");
+		} else {
+			request->send(200, "text/plain", "empty ssid or password");
+			// request->redirect("/");
+		}
+	});
+	// handle GET request to <host>/setCredentials?ssid=<ssid>&password=<password>
+	server.on("/loginForm", HTTP_GET, [] (AsyncWebServerRequest *request) {
+		request->send(200, "text/html", loginIndex);
+	});
+
+	server.onNotFound(notFound);
+
+	server.begin();
+
 }
 
 void loop(void) {
-  serverUpdater.handleClient();
-  delay(1);
+
+		cc++;
+		if (!(cc % sec)) {
+			Serial.println(String(cc / sec) + " sec \t "+String(mode)+" mode \t");
+		}
+
+		if (mode == MODE_STARTUP && !(cc % sec) && ! (cc % (sec*TIMEOUT_START))) {
+			Serial.println(String(TIMEOUT_START) + "sec timeout reached");
+			mode = MODE_CONFIGURED;
+			// switchMode();
+		}
+
+		if (mode == MODE_STARTUP) {
+			// startupServer.handleClient();
+		}
+		
+		if (mode == MODE_CONFIGURED) {
+			// server.handleClient();
+		}
+
+		delay(1);
 }

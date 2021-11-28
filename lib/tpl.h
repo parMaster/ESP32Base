@@ -4,52 +4,41 @@
  */
 
 const char* loginIndex =
- "<form name='loginForm'>"
+ "<br><br><a href='/stayPut'>Stay in Startup mode</a><br>"
+ "<br><br><a href='/uploadForm'>Upload Firmware update</a><br>"
+ "<form name='loginForm' action='/setCredentials' method='GET'>"
     "<table width='20%' bgcolor='A09F9F' align='center'>"
         "<tr>"
             "<td colspan=2>"
-                "<center><font size=4><b>ESP32 Login Page</b></font></center>"
+                "<center><font size=4><b>Set WiFi Credentials and Connect to Network:</b></font></center>"
                 "<br>"
             "</td>"
             "<br>"
             "<br>"
         "</tr>"
         "<tr>"
-             "<td>Username:</td>"
-             "<td><input type='text' size=25 name='userid'><br></td>"
+             "<td>SSID:</td>"
+             "<td><input type='text' size=32 name='ssid'><br></td>"
         "</tr>"
         "<br>"
         "<br>"
         "<tr>"
             "<td>Password:</td>"
-            "<td><input type='Password' size=25 name='pwd'><br></td>"
+            "<td><input type='Password' size=63 name='password'><br></td>"
             "<br>"
             "<br>"
         "</tr>"
         "<tr>"
-            "<td><input type='submit' onclick='check(this.form)' value='Login'></td>"
+            "<td><input type='submit' value='Save & Connect'></td>"
         "</tr>"
     "</table>"
-"</form>"
-"<script>"
-    "function check(form)"
-    "{"
-    "if(form.userid.value=='admin' && form.pwd.value=='admin')"
-    "{"
-    "window.open('/serverIndex')"
-    "}"
-    "else"
-    "{"
-    " alert('Error Password or Username')/*displays error message*/"
-    "}"
-    "}"
-"</script>";
+"</form>";
 
 /*
- * Server Index Page
+ * Upload Form Page
  */
 
-const char* serverIndex =
+const char* uploadForm =
 "<script src='https://ajax.googleapis.com/ajax/libs/jquery/3.2.1/jquery.min.js'></script>"
 "<form method='POST' action='#' enctype='multipart/form-data' id='upload_form'>"
    "<input type='file' name='update'>"
