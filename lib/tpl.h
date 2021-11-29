@@ -5,7 +5,7 @@
 
 const char* loginIndex =
  "<br><br><a href='/stayPut'>Stay in Startup mode</a><br>"
- "<br><br><a href='/uploadForm'>Upload Firmware update</a><br>"
+ "<br><br><a href='/update'>Upload Firmware update</a><br>"
  "<form name='loginForm' action='/setCredentials' method='GET'>"
     "<table width='20%' bgcolor='A09F9F' align='center'>"
         "<tr>"
