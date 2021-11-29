@@ -11,12 +11,11 @@ String eepromReadString(int from, int size) {
 
 	for (int i = from; i < from+size; ++i) {
 		if (EEPROM.read(i) != 0) {
-			Serial.print(EEPROM.read(i));
+			Serial.printf("%d \t", EEPROM.read(i));
 			result += char(EEPROM.read(i));
 		} 
 	}
-	Serial.print("EEPROM read result: ");
-	Serial.println(result);
+	Serial.printf("\r\n EEPROM read result: %s \r\n", result.c_str());
 	return result;
 }
 

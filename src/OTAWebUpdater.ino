@@ -10,17 +10,20 @@
 
 // #define M5Dev
 #ifdef M5Dev
-#include <M5Stack.h>
+//#include <M5Stack.h>
 #endif
 
-
 #define EEPROM_SIZE		 128	// 128 bytes total
-#define EEPROM_SSID_ADDR 1		// 32 bytes
-#define EEPROM_PASS_ADDR 33		// 63 bytes long
+#define EEPROM_RESV_ADDR 0		// first byte reserved for init flag
+#define EEPROM_SSID_ADDR 1		// Bytes 1-32 store wifi SSID
+#define EEPROM_SSID_SIZE 32		// 32 bytes long SSID
+#define EEPROM_PASS_ADDR 33		// Bytes 33-99 store wifi password
+#define EEPROM_PASS_SIZE 64		// 64 bytes long
 
-int TIMEOUT_START = 30;
+int TIMEOUT_START = 120;
 
-const int sec = 800;
+const int tickMS = 1;
+const int sec = 1000/tickMS;
 
 const char *host = "esp32";
 const char *ssid_start = "esp32start";
@@ -33,6 +36,8 @@ String password = "";
 
 */
 
+#define WIFI_STATUS_LED_PIN 2
+
 volatile int cc = 0;
 
 const int MODE_STARTUP = 0;
@@ -41,15 +46,16 @@ volatile byte mode = MODE_STARTUP;
 
 AsyncWebServer server(80);
 
-// ============
-
-
+// Time related libs 
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP);
-// ============
 
+#include <ESP32Time.h>
+ESP32Time rtc;
+bool rtcSet = false;
+const int TIMEZONE_OFFSET = 2*3600; // GMT+2, Kyiv
 
 void notFound(AsyncWebServerRequest *request) {
     request->send(404, "text/plain", "Not found");
@@ -77,10 +83,10 @@ void setup() {
 	EEPROM.begin(EEPROM_SIZE);
 	delay(100);
 
-	ssid = eepromReadString(EEPROM_SSID_ADDR, 32);
+	ssid = eepromReadString(EEPROM_SSID_ADDR, EEPROM_SSID_SIZE);
 	Serial.printf("SSID from EEPROM: %s\r\n", ssid.c_str());
 
-	password = eepromReadString(EEPROM_PASS_ADDR, 64);
+	password = eepromReadString(EEPROM_PASS_ADDR, EEPROM_PASS_SIZE);
 	Serial.printf("PASS from EEPROM: %s\r\n", password.c_str());
 
 	if (ssid.length() > 1 && password.length() > 1) {
@@ -97,13 +103,10 @@ void setup() {
 		Serial.printf("WiFi.status(): %d\r\n", WiFi.status());
 	}
 
-
-// =======================
+	pinMode(WIFI_STATUS_LED_PIN, OUTPUT);
 
 	timeClient.begin();
-	timeClient.setTimeOffset(2*3600);
-
-// ===================
+	timeClient.setTimeOffset(TIMEZONE_OFFSET);
 
 	server.on("/", HTTP_GET, [] (AsyncWebServerRequest *request) {
 			request->redirect("/loginForm");
@@ -126,7 +129,6 @@ void setup() {
 				eepromClear(0, EEPROM_SIZE);
 				eepromWriteString(EEPROM_SSID_ADDR, ssid);
 				eepromWriteString(EEPROM_PASS_ADDR, password);
-
 				Serial.printf("%s:%s credentials set. Rebooting in 10 sec...", ssid.c_str(), password.c_str());
 			}
 
@@ -139,7 +141,7 @@ void setup() {
 			// request->redirect("/");
 		}
 	});
-	// handle GET request to <host>/setCredentials?ssid=<ssid>&password=<password>
+	
 	server.on("/loginForm", HTTP_GET, [] (AsyncWebServerRequest *request) {
 		request->send(200, "text/html", loginIndex);
 	});
@@ -153,15 +155,25 @@ void setup() {
 void loop(void) {
 	cc++;
 	if (!(cc % sec)) {
-		// Serial.printf("%d sec \t %d mode \r\n", int(cc / sec), mode);
-		Serial.println(timeClient.getFormattedTime());
+		Serial.print(timeClient.getFormattedTime());
+		Serial.print(" - ");
+		if (rtcSet) {
+			Serial.println(rtc.getTime("%A, %B %d %Y %H:%M:%S"));
+		}
 	}
 
-	if (!(cc %(10*sec))) {
-		if (!timeClient.update()) {
-			timeClient.forceUpdate();
+	if ((cc==1) || !(cc %(10*sec))) {
+		if (WiFi.status() == WL_CONNECTED) {
+			
+			digitalWrite(WIFI_STATUS_LED_PIN, HIGH);
+			if (!timeClient.update()) {
+				timeClient.forceUpdate();
+			} else {
+				rtc.setTime(timeClient.getEpochTime());
+				rtcSet = true;
+			}
 		} else {
-			//timeClient.getEpochTime()
+			digitalWrite(WIFI_STATUS_LED_PIN, LOW);
 		}
 	}
 
@@ -169,6 +181,7 @@ void loop(void) {
 		Serial.printf("%d sec timeout reached\r\n", TIMEOUT_START);
 		mode = MODE_CONFIGURED;
 		WiFi.softAPdisconnect(true);
+		// WiFi.disconnect(true);
 	}
 
 	if (mode == MODE_STARTUP) {
@@ -179,8 +192,5 @@ void loop(void) {
 		// server.handleClient();
 	}
 
-
-	delay(1);
-
-
+	delay(tickMS);
 }
