@@ -15,15 +15,18 @@
 
 #define EEPROM_SIZE		 128	// 128 bytes total
 #define EEPROM_RESV_ADDR 0		// first byte reserved for init flag
-#define EEPROM_SSID_ADDR 1		// Bytes 1-32 store wifi SSID
+#define EEPROM_RESV_SIZE 1		// 
+
+#define EEPROM_SSID_ADDR 1		// Bytes 1:32 store wifi SSID
 #define EEPROM_SSID_SIZE 32		// 32 bytes long SSID
-#define EEPROM_PASS_ADDR 33		// Bytes 33-99 store wifi password
+
+#define EEPROM_PASS_ADDR 33		// Bytes 33:97 store wifi password
 #define EEPROM_PASS_SIZE 64		// 64 bytes long
 
-int TIMEOUT_START = 120;
+int TIMEOUT_START = 10;
 
-const int tickMS = 1;
-const int sec = 1000/tickMS;
+const int tickMS = 2;
+const int sec = int(1000/tickMS);
 
 const char *host = "esp32";
 const char *ssid_start = "esp32start";
@@ -33,6 +36,7 @@ String ssid = "";
 String password = "";
 
 /* 
+http://esp32.local/setCredentials?ssid=guesto&password=password123
 
 */
 
@@ -40,8 +44,9 @@ String password = "";
 
 volatile int cc = 0;
 
-const int MODE_STARTUP = 0;
-const int MODE_CONFIGURED /* ??? */ = 1;
+#define MODE_STARTUP 		1
+#define MODE_CONNECTED		2
+#define MODE_TIMESET		4
 volatile byte mode = MODE_STARTUP;
 
 AsyncWebServer server(80);
@@ -54,7 +59,6 @@ NTPClient timeClient(ntpUDP);
 
 #include <ESP32Time.h>
 ESP32Time rtc;
-bool rtcSet = false;
 const int TIMEZONE_OFFSET = 2*3600; // GMT+2, Kyiv
 
 void notFound(AsyncWebServerRequest *request) {
@@ -156,13 +160,15 @@ void loop(void) {
 	cc++;
 	if (!(cc % sec)) {
 		Serial.print(timeClient.getFormattedTime());
-		Serial.print(" - ");
-		if (rtcSet) {
+		Serial.print("\t mode: ");
+		Serial.print(mode);
+		Serial.print("\t");
+		if (MODE_TIMESET == (mode & MODE_TIMESET)) {
 			Serial.println(rtc.getTime("%A, %B %d %Y %H:%M:%S"));
 		}
 	}
 
-	if ((cc==1) || !(cc %(10*sec))) {
+	if ((cc<=tickMS) || !(cc %(10*sec))) {
 		if (WiFi.status() == WL_CONNECTED) {
 			
 			digitalWrite(WIFI_STATUS_LED_PIN, HIGH);
@@ -170,27 +176,29 @@ void loop(void) {
 				timeClient.forceUpdate();
 			} else {
 				rtc.setTime(timeClient.getEpochTime());
-				rtcSet = true;
+				mode |= MODE_TIMESET;
 			}
+			mode |= MODE_CONNECTED;
 		} else {
-			digitalWrite(WIFI_STATUS_LED_PIN, LOW);
+			mode &= ~MODE_CONNECTED;
 		}
 	}
 
-	if (mode == MODE_STARTUP && !(cc % sec) && ! (cc % (sec*TIMEOUT_START))) {
+	if ((mode & MODE_STARTUP) && !(cc % sec) && ! (cc % (sec*TIMEOUT_START))) {
 		Serial.printf("%d sec timeout reached\r\n", TIMEOUT_START);
-		mode = MODE_CONFIGURED;
+		mode ^= MODE_STARTUP;
 		WiFi.softAPdisconnect(true);
 		// WiFi.disconnect(true);
 	}
 
-	if (mode == MODE_STARTUP) {
-		// startupServer.handleClient();
+	if (!(cc % sec)) {
+		if (mode & MODE_CONNECTED) {
+			digitalWrite(WIFI_STATUS_LED_PIN, HIGH);			
+		} else {
+			digitalWrite(WIFI_STATUS_LED_PIN, LOW);
+		}
 	}
 	
-	if (mode == MODE_CONFIGURED) {
-		// server.handleClient();
-	}
 
 	delay(tickMS);
 }
