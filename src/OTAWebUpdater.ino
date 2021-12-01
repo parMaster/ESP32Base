@@ -15,6 +15,9 @@ extern "C" {
 }
 // #include <AsyncMqttClient.h>
 TimerHandle_t wifiReconnectTimer;
+TimerHandle_t clockUpdateTimer;
+TimerHandle_t afterStartupTimer;
+TimerHandle_t logStatusTimer;
 
 // #define M5Dev
 #ifdef M5Dev
@@ -131,20 +134,20 @@ void triggerHeater() {
 	Serial.print(highest);
 	Serial.print(" | max Allowed = ");
 	Serial.print(highestAllowedTemp);
-#endif;
+#endif
 
 	if ((currentTemp < targetTemp) &&
 		(highest < highestAllowedTemp)) {
 		
 //		digitalWrite(heaterRelayPin, LOW);
 //		heaterRelayState = LOW;
-		Serial.println(" | triggerHeater ON");
+		// Serial.println(" | triggerHeater ON");
 	}
 	else
 	{
 //		digitalWrite(heaterRelayPin, HIGH);
 //		heaterRelayState = HIGH;
-		Serial.println(" | triggerHeater OFF");
+		// Serial.println(" | triggerHeater OFF");
 	}
 }
 // =========================================================================
@@ -152,8 +155,7 @@ void triggerHeater() {
 void WiFiEvent(WiFiEvent_t event)
 {
 	Serial.printf("[WiFi-event] event: %d\n", event);
-	switch (event)
-	{
+	switch (event) {
 	case SYSTEM_EVENT_STA_GOT_IP:
 		Serial.println("WiFi connected");
 		Serial.println("IP address: ");
@@ -164,18 +166,22 @@ void WiFiEvent(WiFiEvent_t event)
 		Serial.println("WiFi lost connection");
 		// xTimerStop(mqttReconnectTimer, 0); // ensure we don't reconnect to MQTT while reconnecting to Wi-Fi
 		xTimerStart(wifiReconnectTimer, 0);
+		xTimerStop(clockUpdateTimer, 0);
+
+		break;
+	case SYSTEM_EVENT_STA_CONNECTED:
+		xTimerStop(wifiReconnectTimer, 0);
+		xTimerStart(clockUpdateTimer, 0);
 		break;
 	}
 }
 
 bool connectToWifi() {
-	if ((WiFi.status() != WL_CONNECTED) && ssid.length() > 1 && password.length() > 1)
-	{
+	if ((WiFi.status() != WL_CONNECTED) && ssid.length() > 1 && password.length() > 1) {
 		int i = 0;
 		WiFi.begin(ssid.c_str(), password.c_str());
 		Serial.printf("Connecting to WiFi: %s:%s \n\r", ssid.c_str(), password.c_str());
-		while (WiFi.status() != WL_CONNECTED && (i < 10))
-		{
+		while (WiFi.status() != WL_CONNECTED && (i < 10)) {
 			i++;
 			delay(1 * sec);
 			Serial.print(i);
@@ -183,6 +189,41 @@ bool connectToWifi() {
 		Serial.printf("WiFi.status(): %d\r\n", WiFi.status());
 	}
 	return (WiFi.status() == WL_CONNECTED);
+}
+bool updateClock() {
+	if (WiFi.status() == WL_CONNECTED) {	
+		if (!timeClient.update()) {
+			timeClient.forceUpdate();
+		} else {
+			rtc.setTime(timeClient.getEpochTime());
+			mode |= MODE_TIMESET;
+			return true;
+		}
+	}
+	return false;
+}
+
+void logStatus() {
+		Serial.print(timeClient.getFormattedTime());
+		Serial.print(" ");
+		// Serial.print("\t mode: ");
+		// Serial.print(mode);
+		if (MODE_TIMESET == (mode & MODE_TIMESET)) {
+			Serial.println(rtc.getTime("%A, %B %d %Y %H:%M:%S"));
+		}
+
+		if (MODE_CONNECTED == (mode & MODE_CONNECTED)) {
+		
+			// report to the mothership
+
+		}
+}
+void stopAP() {
+	Serial.printf("%d sec timeout reached\r\n", TIMEOUT_START);
+	Serial.printf("Stopping softAP...\r\n");
+	mode ^= MODE_STARTUP;
+	WiFi.softAPdisconnect(true);
+	delay(100);
 }
 
 void notFound(AsyncWebServerRequest *request) {
@@ -204,8 +245,7 @@ void setup() {
 	IPAddress IP = WiFi.softAPIP();
 	Serial.printf("AP IP address: %s \r\n", IP.toString().c_str());
 
-	if (MDNS.begin(host))
-	{
+	if (MDNS.begin(host)) {
 		Serial.println("mDNS responder started");
 	}
 
@@ -218,27 +258,32 @@ void setup() {
 	password = eepromReadString(EEPROM_PASS_ADDR, EEPROM_PASS_SIZE);
 	Serial.printf("PASS from EEPROM: %s\r\n", password.c_str());
 
-	wifiReconnectTimer = xTimerCreate("wifiTimer", pdMS_TO_TICKS(10000), pdFALSE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(connectToWifi));
+	wifiReconnectTimer = xTimerCreate("wifiReconnectTimer", pdMS_TO_TICKS(1000), pdTRUE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(connectToWifi));
+	xTimerStart(wifiReconnectTimer, 0);
+	clockUpdateTimer = xTimerCreate("clockUpdateTimer", pdMS_TO_TICKS(2000), pdTRUE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(updateClock));
+	xTimerStart(clockUpdateTimer, 0);
+	afterStartupTimer = xTimerCreate("afterStartupTimer", pdMS_TO_TICKS(TIMEOUT_START*1000), pdFALSE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(stopAP));
+	xTimerStart(afterStartupTimer, 0);
+	logStatusTimer = xTimerCreate("logStatusTimer", pdMS_TO_TICKS(1000), pdTRUE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(logStatus));
+	xTimerStart(logStatusTimer, 0);
 
-	if (connectToWifi()) {
-		WiFi.onEvent(WiFiEvent);
-	}
+	WiFi.onEvent(WiFiEvent);
 
 	timeClient.begin();
 	timeClient.setTimeOffset(TIMEZONE_OFFSET);
 
 	server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
-			  { request->redirect("/loginForm"); });
+			  { request->redirect("/loginForm"); 
+	});
 
-	server.on("/stayPut", HTTP_GET, [](AsyncWebServerRequest *request)
-			  {
+	server.on("/stayPut", HTTP_GET, [](AsyncWebServerRequest *request) {
 		Serial.println("Staying in startup mode for 10 more minutes. Enjoy!");
 		TIMEOUT_START = 600 * sec;
-		request->redirect("/login"); });
+		request->redirect("/login");
+	});
 
 	// handle GET request to <host>/setCredentials?ssid=<ssid>&password=<password>
-	server.on("/setCredentials", HTTP_GET, [](AsyncWebServerRequest *request)
-			  {
+	server.on("/setCredentials", HTTP_GET, [](AsyncWebServerRequest *request) {
 		if (request->hasParam("ssid") && request->hasParam("password")) {
 			
 			ssid = request->getParam("ssid")->value();
@@ -258,10 +303,12 @@ void setup() {
 		} else {
 			request->send(200, "text/plain", "empty ssid or password");
 			// request->redirect("/");
-		} });
+		} 
+	});
 
-	server.on("/loginForm", HTTP_GET, [](AsyncWebServerRequest *request)
-			  { request->send(200, "text/html", loginIndex); });
+	server.on("/loginForm", HTTP_GET, [](AsyncWebServerRequest *request) {
+		request->send(200, "text/html", loginIndex); 
+	});
 
 	// =========================================================================
 
@@ -271,8 +318,7 @@ void setup() {
 
 	sensors.begin();
 
-	for (int i = 0; i < NUM_SENSORS; i++)
-	{
+	for (int i = 0; i < NUM_SENSORS; i++) {
 		sensors.setResolution(probesAddr[i], TEMPERATURE_PRECISION);
 	}
 	// =========================================================================
@@ -285,38 +331,8 @@ void setup() {
 
 void loop(void) {
 	cc++;
-	if (!(cc % sec)) {
-		Serial.print(timeClient.getFormattedTime());
-		Serial.print("\t mode: ");
-		Serial.print(mode);
-		Serial.print("\t");
-		if (MODE_TIMESET == (mode & MODE_TIMESET)) {
-			Serial.println(rtc.getTime("%A, %B %d %Y %H:%M:%S"));
-		}
-	}
 
-	if ((cc<=tickMS) || !(cc %(10*sec))) {
-		if (WiFi.status() == WL_CONNECTED) {
-			
-			digitalWrite(WIFI_STATUS_LED_PIN, HIGH);
-			if (!timeClient.update()) {
-				timeClient.forceUpdate();
-			} else {
-				rtc.setTime(timeClient.getEpochTime());
-				mode |= MODE_TIMESET;
-			}
-			mode |= MODE_CONNECTED;
-		} else {
-			mode &= ~MODE_CONNECTED;
-		}
-	}
 
-	if ((mode & MODE_STARTUP) && !(cc % sec) && ! (cc % (sec*TIMEOUT_START))) {
-		Serial.printf("%d sec timeout reached\r\n", TIMEOUT_START);
-		mode ^= MODE_STARTUP;
-		WiFi.softAPdisconnect(true);
-		// WiFi.disconnect(true);
-	}
 
 
 	// =========================================================================
@@ -358,11 +374,7 @@ void loop(void) {
 		triggerHeater();
 		// triggerLed();
 
-		if (MODE_CONNECTED == (mode & MODE_CONNECTED)) {
-		
-			// report to the mothership
 
-		}
 	}
 
 	// Indicate WiFi connection with a blue LED on WROOM board 
