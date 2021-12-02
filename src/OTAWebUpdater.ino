@@ -7,13 +7,14 @@
 #include <EEPROM.h>
 #include <../lib/tpl.h>
 #include <../lib/eeprom.h>
+#include <../lib/mqtt.h>
 #include <DallasTemperature.h>
 
 extern "C" {
 	#include "freertos/FreeRTOS.h"
 	#include "freertos/timers.h"
 }
-// #include <AsyncMqttClient.h>
+
 TimerHandle_t wifiReconnectTimer;
 TimerHandle_t clockUpdateTimer;
 TimerHandle_t afterStartupTimer;
@@ -36,7 +37,7 @@ TimerHandle_t logStatusTimer;
 
 int TIMEOUT_START = 10;
 
-const int tickMS = 2;
+const int tickMS = 1;
 const int sec = int(1000/tickMS);
 
 const char *host = "esp32";
@@ -45,8 +46,6 @@ const char *password_start = "esp32start";
 
 String ssid = "";
 String password = "";
-
-volatile int cc = 0;
 
 // RUN MODES 
 #define MODE_STARTUP 		1
@@ -73,6 +72,9 @@ NTPClient timeClient(ntpUDP);
 #include <ESP32Time.h>
 ESP32Time rtc;
 const int TIMEZONE_OFFSET = 2*3600; // GMT+2, Kyiv
+
+#define MQTT_HOST IPAddress(10, 0, 1, 7)
+#define MQTT_PORT 1883
 
 // =========================================================================
 
@@ -160,17 +162,17 @@ void WiFiEvent(WiFiEvent_t event)
 		Serial.println("WiFi connected");
 		Serial.println("IP address: ");
 		Serial.println(WiFi.localIP());
-		// connectToMqtt();
+		connectToMqtt();
 		break;
 	case SYSTEM_EVENT_STA_DISCONNECTED:
 		Serial.println("WiFi lost connection");
-		// xTimerStop(mqttReconnectTimer, 0); // ensure we don't reconnect to MQTT while reconnecting to Wi-Fi
 		xTimerStart(wifiReconnectTimer, 0);
+		xTimerStop(mqttReconnectTimer, 0); // ensure we don't reconnect to MQTT while reconnecting to Wi-Fi
 		xTimerStop(clockUpdateTimer, 0);
-
 		break;
 	case SYSTEM_EVENT_STA_CONNECTED:
 		xTimerStop(wifiReconnectTimer, 0);
+		xTimerStart(mqttReconnectTimer, 0);
 		xTimerStart(clockUpdateTimer, 0);
 		break;
 	}
@@ -188,8 +190,13 @@ bool connectToWifi() {
 		}
 		Serial.printf("WiFi.status(): %d\r\n", WiFi.status());
 	}
+
+	// Indicate WiFi connection with a blue LED on WROOM board 
+	digitalWrite(WIFI_STATUS_LED_PIN, (WiFi.status() == WL_CONNECTED)?HIGH:LOW);
+
 	return (WiFi.status() == WL_CONNECTED);
 }
+
 bool updateClock() {
 	if (WiFi.status() == WL_CONNECTED) {	
 		if (!timeClient.update()) {
@@ -206,8 +213,6 @@ bool updateClock() {
 void logStatus() {
 		Serial.print(timeClient.getFormattedTime());
 		Serial.print(" ");
-		// Serial.print("\t mode: ");
-		// Serial.print(mode);
 		if (MODE_TIMESET == (mode & MODE_TIMESET)) {
 			Serial.println(rtc.getTime("%A, %B %d %Y %H:%M:%S"));
 		}
@@ -218,6 +223,41 @@ void logStatus() {
 
 		}
 }
+
+void controlTemperature() {
+	sensors.requestTemperatures();
+
+	for (int i = 0; i < NUM_SENSORS; i++) {
+		// temperature[i] = getTemperature(probesAddr[i]);
+		if (temperature[i] == -127.0) {
+			temperature[i] = 0;
+		}
+	}
+
+	lowest = 1000.0;
+	highest = -1000.0;
+	average = 0.0;
+	int measures = 0;
+	for (int i = 0; i < NUM_SENSORS; i++) {
+		if (temperature[i] != 0) {
+			measures++;
+			average += temperature[i];
+
+			if (temperature[i] < lowest)
+				lowest = temperature[i];
+
+			if (temperature[i] > highest)
+				highest = temperature[i];
+		}
+	}
+	if (measures > 0)
+		average /= measures;
+
+	currentTemp = average;
+
+	triggerHeater();
+}
+
 void stopAP() {
 	Serial.printf("%d sec timeout reached\r\n", TIMEOUT_START);
 	Serial.printf("Stopping softAP...\r\n");
@@ -260,12 +300,25 @@ void setup() {
 
 	wifiReconnectTimer = xTimerCreate("wifiReconnectTimer", pdMS_TO_TICKS(1000), pdTRUE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(connectToWifi));
 	xTimerStart(wifiReconnectTimer, 0);
+
 	clockUpdateTimer = xTimerCreate("clockUpdateTimer", pdMS_TO_TICKS(2000), pdTRUE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(updateClock));
 	xTimerStart(clockUpdateTimer, 0);
+
 	afterStartupTimer = xTimerCreate("afterStartupTimer", pdMS_TO_TICKS(TIMEOUT_START*1000), pdFALSE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(stopAP));
 	xTimerStart(afterStartupTimer, 0);
+
 	logStatusTimer = xTimerCreate("logStatusTimer", pdMS_TO_TICKS(1000), pdTRUE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(logStatus));
 	xTimerStart(logStatusTimer, 0);
+
+	mqttReconnectTimer = xTimerCreate("mqttReconnectTimer", pdMS_TO_TICKS(2000), pdFALSE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(connectToMqtt));
+
+	mqttClient.onConnect(onMqttConnect);
+	mqttClient.onDisconnect(onMqttDisconnect);
+	mqttClient.onSubscribe(onMqttSubscribe);
+	mqttClient.onUnsubscribe(onMqttUnsubscribe);
+	mqttClient.onMessage(onMqttMessage);
+	mqttClient.onPublish(onMqttPublish);
+	mqttClient.setServer(MQTT_HOST, MQTT_PORT);
 
 	WiFi.onEvent(WiFiEvent);
 
@@ -330,65 +383,7 @@ void setup() {
 }
 
 void loop(void) {
-	cc++;
-
-
-
-
-	// =========================================================================
-
-
-	// every second
-	if (!(cc % sec)) {
-
-		sensors.requestTemperatures();
-
-		for (int i = 0; i < NUM_SENSORS; i++) {
-			// temperature[i] = getTemperature(probesAddr[i]);
-			if (temperature[i] == -127.0) {
-				temperature[i] = 0;
-			}
-		}
-
-		lowest = 1000.0;
-		highest = -1000.0;
-		average = 0.0;
-		int measures = 0;
-		for (int i = 0; i < NUM_SENSORS; i++) {
-			if (temperature[i] != 0) {
-				measures++;
-				average += temperature[i];
-
-				if (temperature[i] < lowest)
-					lowest = temperature[i];
-
-				if (temperature[i] > highest)
-					highest = temperature[i];
-			}
-		}
-		if (measures > 0)
-			average /= measures;
-
-		currentTemp = average;
-
-		triggerHeater();
-		// triggerLed();
-
-
-	}
-
-	// Indicate WiFi connection with a blue LED on WROOM board 
-	if (!(cc % sec)) {
-		if (mode & MODE_CONNECTED) {
-			digitalWrite(WIFI_STATUS_LED_PIN, HIGH);			
-		} else {
-			digitalWrite(WIFI_STATUS_LED_PIN, LOW);
-		}
-	}
-
-	// =========================================================================
 	
-	delay(tickMS);
 }
 
 // http://esp32.local/setCredentials?ssid=guesto&password=password123
