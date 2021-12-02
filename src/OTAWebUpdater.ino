@@ -7,6 +7,7 @@
 #include <EEPROM.h>
 #include <../lib/tpl.h>
 #include <../lib/eeprom.h>
+#include <../lib/temperature.h>
 #include <../lib/mqtt.h>
 #include <DallasTemperature.h>
 
@@ -81,8 +82,8 @@ const int TIMEZONE_OFFSET = 2*3600; // GMT+2, Kyiv
 // PINS 
 #define ONE_WIRE_BUS 		21 // GPIO 21 (SDA)
 #define WIFI_STATUS_LED_PIN 2
-#define RELAY_1_PIN 34
-#define RELAY_2_PIN 35
+#define RELAY_1_PIN 32
+#define RELAY_2_PIN 33
 
 // Sensors setup
 #define TEMPERATURE_PRECISION 10
@@ -90,7 +91,14 @@ OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
 
 #define NUM_SENSORS 2
-const DeviceAddress probesAddr[2] = {
+
+uint8_t pin21[][8] = {
+  { 0x28, 0x86, 0xC2, 0x77, 0x91, 0x09, 0x02, 0x44  },
+};
+
+
+
+DeviceAddress probesAddr[2] = {
 	{0x28, 0x7D, 0x10, 0x45, 0x92, 0x0D, 0x02, 0x83},
 	{0x28, 0xDF, 0x7B, 0x45, 0x92, 0x18, 0x02, 0xC3},
 };
@@ -211,20 +219,23 @@ bool updateClock() {
 }
 
 void logStatus() {
-		Serial.print(timeClient.getFormattedTime());
-		Serial.print(" ");
-		if (MODE_TIMESET == (mode & MODE_TIMESET)) {
-			Serial.println(rtc.getTime("%A, %B %d %Y %H:%M:%S"));
-		}
 
-		if (MODE_CONNECTED == (mode & MODE_CONNECTED)) {
-		
-			// report to the mothership
+	Serial.print(timeClient.getFormattedTime());
+	Serial.print(" ");
+	if (MODE_TIMESET == (mode & MODE_TIMESET)) {
+		Serial.println(rtc.getTime("%A, %B %d %Y %H:%M:%S"));
+	}
 
-		}
+	if (MODE_CONNECTED == (mode & MODE_CONNECTED)) {
+	
+		// report to the mothership
+
+	}
 }
 
 void controlTemperature() {
+
+	
 	sensors.requestTemperatures();
 
 	for (int i = 0; i < NUM_SENSORS; i++) {
@@ -371,9 +382,9 @@ void setup() {
 
 	sensors.begin();
 
-	for (int i = 0; i < NUM_SENSORS; i++) {
-		sensors.setResolution(probesAddr[i], TEMPERATURE_PRECISION);
-	}
+	// for (int i = 0; i < NUM_SENSORS; i++) {
+	// 	sensors.setResolution(probesAddr[i], TEMPERATURE_PRECISION);
+	// }
 	// =========================================================================
 
 	server.onNotFound(notFound);
