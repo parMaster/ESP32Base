@@ -13,8 +13,5 @@ MUST haves:
 Good to haves:
 - As close to RTC as possible, even after multi-day offline modes. Without RTC, with occasional NTP availability
 - Easily compilable and deployable examples
-- Telegram bot interface
-
-TBD:
-- web sockets (how often an IoT device needs it?)
-
+- MQTT interface with authentification
+- Total control with a Telegram bot MQTT client
