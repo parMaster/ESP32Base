@@ -7,7 +7,7 @@
 #include <EEPROM.h>
 #include <../lib/tpl.h>
 #include <../lib/eeprom.h>
-#include <../lib/temperature.h>
+// #include <../lib/temperature.h>
 #include <../lib/mqtt.h>
 #include <DallasTemperature.h>
 
@@ -21,9 +21,9 @@ TimerHandle_t clockUpdateTimer;
 TimerHandle_t afterStartupTimer;
 TimerHandle_t logStatusTimer;
 
-// #define M5Dev
+#define M5Dev
 #ifdef M5Dev
-//#include <M5Stack.h>
+#include <M5Stack.h>
 #endif
 
 #define EEPROM_SIZE		 128	// 128 bytes total
@@ -74,8 +74,9 @@ NTPClient timeClient(ntpUDP);
 ESP32Time rtc;
 const int TIMEZONE_OFFSET = 2*3600; // GMT+2, Kyiv
 
-#define MQTT_HOST IPAddress(10, 0, 1, 7)
-#define MQTT_PORT 1883
+#define MQTT_HOST	IPAddress(10, 0, 1, 13)
+#define MQTT_PORT	1883
+#define MQTT_IDENT	"esp32base"
 
 // =========================================================================
 
@@ -224,13 +225,12 @@ void logStatus() {
 	Serial.print(" ");
 	if (MODE_TIMESET == (mode & MODE_TIMESET)) {
 		Serial.println(rtc.getTime("%A, %B %d %Y %H:%M:%S"));
+		if (mqttClient.connected()) {	
+			// mqttClient.publish("esp32base/log", 2, true, rtc.getTime("%A, %B %d %Y %H:%M:%S").c_str());
+		}
 	}
 
-	if (MODE_CONNECTED == (mode & MODE_CONNECTED)) {
-	
-		// report to the mothership
 
-	}
 }
 
 void controlTemperature() {
