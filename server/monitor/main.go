@@ -1,6 +1,4 @@
 // Use Mosquitto and PAHO
-//  Install mosquitto properly: https://upcloud.com/community/tutorials/install-secure-mqtt-broker-ubuntu/#point-5
-// turn off anon access
 
 package main
 
@@ -22,8 +20,15 @@ var f MQTT.MessageHandler = func(client MQTT.Client, msg MQTT.Message) {
 func main() {
 	//create a ClientOptions struct setting the broker address, clientid, turn
 	//off trace output and set the default message handler
-	opts := MQTT.NewClientOptions().AddBroker("tcp://cdns.com.ua:1883")
+	opts := MQTT.NewClientOptions().AddBroker("tcp://mqtt.cdns.com.ua:8083")
+	opts.SetUsername("gusto")
+	opts.SetPassword("")
 	opts.SetClientID("go-simple")
+
+	// privateKey:	/etc/letsencrypt/live/mqtt.example.com/privkey.pem
+	// certificate:	/etc/letsencrypt/live/mqtt.example.com/cert.pem
+	// ca:			/etc/letsencrypt/live/mqtt.example.com/chain.pem
+
 	opts.SetDefaultPublishHandler(f)
 
 	//create and start a client using the above ClientOptions
