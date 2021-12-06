@@ -20,7 +20,7 @@ var f MQTT.MessageHandler = func(client MQTT.Client, msg MQTT.Message) {
 func main() {
 	//create a ClientOptions struct setting the broker address, clientid, turn
 	//off trace output and set the default message handler
-	opts := MQTT.NewClientOptions().AddBroker("tcp://mqtt.cdns.com.ua:8083")
+	opts := MQTT.NewClientOptions().AddBroker("ssl://mqtt.cdns.com.ua:8883")
 	opts.SetUsername("gusto")
 	opts.SetPassword("")
 	opts.SetClientID("go-simple")
