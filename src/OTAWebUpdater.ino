@@ -1,4 +1,3 @@
-#include <WiFi.h>
 #include <WiFiClient.h>
 #include <ESPmDNS.h>
 #include <AsyncTCP.h>
@@ -74,9 +73,11 @@ NTPClient timeClient(ntpUDP);
 ESP32Time rtc;
 const int TIMEZONE_OFFSET = 2*3600; // GMT+2, Kyiv
 
-#define MQTT_HOST	IPAddress(10, 0, 1, 13)
+#define MQTT_HOST	"mqtt.cdns.com.ua"
 #define MQTT_PORT	1883
 #define MQTT_IDENT	"esp32base"
+#define MQTT_USER	"gusto"
+#define MQTT_PASS	""
 
 // =========================================================================
 
@@ -96,8 +97,6 @@ DallasTemperature sensors(&oneWire);
 uint8_t pin21[][8] = {
   { 0x28, 0x86, 0xC2, 0x77, 0x91, 0x09, 0x02, 0x44  },
 };
-
-
 
 DeviceAddress probesAddr[2] = {
 	{0x28, 0x7D, 0x10, 0x45, 0x92, 0x0D, 0x02, 0x83},
@@ -226,7 +225,7 @@ void logStatus() {
 	if (MODE_TIMESET == (mode & MODE_TIMESET)) {
 		Serial.println(rtc.getTime("%A, %B %d %Y %H:%M:%S"));
 		if (mqttClient.connected()) {	
-			// mqttClient.publish("esp32base/log", 2, true, rtc.getTime("%A, %B %d %Y %H:%M:%S").c_str());
+			mqttClient.publish("esp32base/log", 2, true, rtc.getTime("%A, %B %d %Y %H:%M:%S").c_str());
 		}
 	}
 
@@ -329,6 +328,7 @@ void setup() {
 	mqttClient.onUnsubscribe(onMqttUnsubscribe);
 	mqttClient.onMessage(onMqttMessage);
 	mqttClient.onPublish(onMqttPublish);
+	mqttClient.setCredentials(MQTT_USER, MQTT_PASS);
 	mqttClient.setServer(MQTT_HOST, MQTT_PORT);
 
 	WiFi.onEvent(WiFiEvent);
