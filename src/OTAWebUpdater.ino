@@ -81,9 +81,6 @@ ESP32Time rtc;
 #define ONE_WIRE_BUS 		21 // GPIO 21
 #define WIFI_STATUS_LED_PIN 2
 
-// Sensors setup
-#include <../lib/temperature.h>
-
 DS18B20 ds(ONE_WIRE_BUS);
 
 // float temperature[NUM_SENSORS];
