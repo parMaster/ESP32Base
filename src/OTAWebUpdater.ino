@@ -1,14 +1,17 @@
+#include <config.h>
 #include <WiFiClient.h>
 #include <ESPmDNS.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <AsyncElegantOTA.h>
 #include <EEPROM.h>
+#include <OneWire.h>
+#include <DS18B20.h>
+
 #include <../lib/tpl.h>
 #include <../lib/eeprom.h>
-// #include <../lib/temperature.h>
 #include <../lib/mqtt.h>
-#include <DallasTemperature.h>
+
 
 extern "C" {
 	#include "freertos/FreeRTOS.h"
@@ -19,8 +22,9 @@ TimerHandle_t wifiReconnectTimer;
 TimerHandle_t clockUpdateTimer;
 TimerHandle_t afterStartupTimer;
 TimerHandle_t logStatusTimer;
+TimerHandle_t pidControlLoopTimer;
 
-#define M5Dev
+// #define M5Dev
 #ifdef M5Dev
 #include <M5Stack.h>
 #endif
@@ -38,19 +42,18 @@ TimerHandle_t logStatusTimer;
 int TIMEOUT_START = 10;
 
 const int tickMS = 1;
-const int sec = int(1000/tickMS);
-
-const char *host = "esp32";
-const char *ssid_start = "esp32start";
-const char *password_start = "esp32start";
+const int sec = int(1000/tickMS); // msec/sec ratio
 
 String ssid = "";
 String password = "";
 
 // RUN MODES 
-#define MODE_STARTUP 		1
-#define MODE_CONNECTED		2
-#define MODE_TIMESET		4
+#define MODE_STARTUP 				1
+#define MODE_CONNECTED				2
+#define MODE_TIMESET				4
+#define MODE_RSRVD8				 	8
+#define MODE_RSRVD16				16
+#define MODE_CONTROL_LOOP			32
 volatile byte mode = MODE_STARTUP;
 /*
 	Set bit			mode |= MODE_STARTUP; 
@@ -71,39 +74,19 @@ NTPClient timeClient(ntpUDP);
 
 #include <ESP32Time.h>
 ESP32Time rtc;
-const int TIMEZONE_OFFSET = 2*3600; // GMT+2, Kyiv
-
-#define MQTT_HOST	"mqtt.cdns.com.ua"
-#define MQTT_PORT	1883
-#define MQTT_IDENT	"esp32base"
-#define MQTT_USER	"gusto"
-#define MQTT_PASS	""
 
 // =========================================================================
 
 // PINS 
-#define ONE_WIRE_BUS 		21 // GPIO 21 (SDA)
+#define ONE_WIRE_BUS 		21 // GPIO 21
 #define WIFI_STATUS_LED_PIN 2
-#define RELAY_1_PIN 32
-#define RELAY_2_PIN 33
 
 // Sensors setup
-#define TEMPERATURE_PRECISION 10
-OneWire oneWire(ONE_WIRE_BUS);
-DallasTemperature sensors(&oneWire);
+#include <../lib/temperature.h>
 
-#define NUM_SENSORS 2
+DS18B20 ds(ONE_WIRE_BUS);
 
-uint8_t pin21[][8] = {
-  { 0x28, 0x86, 0xC2, 0x77, 0x91, 0x09, 0x02, 0x44  },
-};
-
-DeviceAddress probesAddr[2] = {
-	{0x28, 0x7D, 0x10, 0x45, 0x92, 0x0D, 0x02, 0x83},
-	{0x28, 0xDF, 0x7B, 0x45, 0x92, 0x18, 0x02, 0xC3},
-};
-
-float temperature[NUM_SENSORS];
+// float temperature[NUM_SENSORS];
             // Hour of the day:       0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19 20 21 22 23
 static const uint8_t tempProfile[]={ 32,33,34,35,35,35,34,34,33,33,32,32,31,30,29,28,27,26,26,26,27,29,30,31};
 
@@ -115,51 +98,18 @@ float lowest                = 1000.0;
 float highest               = -1000.0;
 float average               = 0.0;
 
-float getTemperature(DeviceAddress deviceAddress) {
-	return sensors.getTempC(deviceAddress);
-}
+byte heaterState = LOW;
+void heaterActivate();
+void heaterDeactivate();
 
-void triggerHeater() {
-#ifdef SERIAL_DEBUG
-	Serial.println("");
-	Serial.print(tm.Hour);
-	Serial.print(":");
-	Serial.print(tm.Minute);
-	Serial.print(":");
-	Serial.print(tm.Second);
+         // Hour of the day:       0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19 20 21 22 23
+static const byte lightProfile[]={ 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+byte lightState = LOW;
+void lightActivate();
+void lightDeactivate();
 
-	Serial.println("");
-	Serial.print("S1 = ");
-	Serial.print(temperature[0]);
-	Serial.print(" | S2 = ");
-	Serial.print(temperature[1]);
-	Serial.print(" | S3 = ");
-	Serial.println(temperature[2]);
-
-	Serial.print("cT - ");
-	Serial.print(currentTemp);
-	Serial.print(" | tT = ");
-	Serial.print(targetTemp);
-	Serial.print(" | highest = ");
-	Serial.print(highest);
-	Serial.print(" | max Allowed = ");
-	Serial.print(highestAllowedTemp);
-#endif
-
-	if ((currentTemp < targetTemp) &&
-		(highest < highestAllowedTemp)) {
-		
-//		digitalWrite(heaterRelayPin, LOW);
-//		heaterRelayState = LOW;
-		// Serial.println(" | triggerHeater ON");
-	}
-	else
-	{
-//		digitalWrite(heaterRelayPin, HIGH);
-//		heaterRelayState = HIGH;
-		// Serial.println(" | triggerHeater OFF");
-	}
-}
+char buffer[256];
+char topicbuf[256];
 // =========================================================================
 
 void WiFiEvent(WiFiEvent_t event)
@@ -218,54 +168,42 @@ bool updateClock() {
 	return false;
 }
 
+uint16_t logMQTT(String topic, String message) {
+	return logMQTT(topic.c_str(), message.c_str());
+}
+uint16_t logMQTT(const char* topic, const char* message) {
+	if (mqttClient.connected()) {	
+
+		sprintf(topicbuf, "%s/%s",MQTT_IDENT, topic);
+		return mqttClient.publish(topicbuf, 2, true, message);
+	}
+	return 0;
+}
+
 void logStatus() {
 
 	Serial.print(timeClient.getFormattedTime());
 	Serial.print(" ");
 	if (MODE_TIMESET == (mode & MODE_TIMESET)) {
 		Serial.println(rtc.getTime("%A, %B %d %Y %H:%M:%S"));
-		if (mqttClient.connected()) {	
-			mqttClient.publish("esp32base/log", 2, true, rtc.getTime("%A, %B %d %Y %H:%M:%S").c_str());
-		}
+
+		// CSV Line
+		// Y-m-d H:m:s ; T lowest; T highest; T average; T target; heater state; light state
+		sprintf(buffer, "%s; %3.2f; %3.2f; %3.2f; %d; %d; %d", 
+			rtc.getTime("%Y-%m-%d %H:%M:%S").c_str(),
+			lowest,
+			highest,
+			average,
+			targetTemp,
+			heaterState,
+			lightState
+		);
+		logMQTT("csvLog", buffer);
 	}
-
-
 }
 
-void controlTemperature() {
-
-	
-	sensors.requestTemperatures();
-
-	for (int i = 0; i < NUM_SENSORS; i++) {
-		// temperature[i] = getTemperature(probesAddr[i]);
-		if (temperature[i] == -127.0) {
-			temperature[i] = 0;
-		}
-	}
-
-	lowest = 1000.0;
-	highest = -1000.0;
-	average = 0.0;
-	int measures = 0;
-	for (int i = 0; i < NUM_SENSORS; i++) {
-		if (temperature[i] != 0) {
-			measures++;
-			average += temperature[i];
-
-			if (temperature[i] < lowest)
-				lowest = temperature[i];
-
-			if (temperature[i] > highest)
-				highest = temperature[i];
-		}
-	}
-	if (measures > 0)
-		average /= measures;
-
-	currentTemp = average;
-
-	triggerHeater();
+void afterStartup() {
+	stopAP();
 }
 
 void stopAP() {
@@ -283,10 +221,10 @@ void notFound(AsyncWebServerRequest *request) {
 void setup() {
 	Serial.begin(115200);
 
-	#ifdef M5Dev
-	M5.begin();
-	M5.Power.begin();
-	#endif
+	// #ifdef M5Dev
+	// M5.begin();
+	// M5.Power.begin();
+	// #endif
 
 	WiFi.mode(WIFI_MODE_APSTA);
 	WiFi.softAP(ssid_start, password_start);
@@ -308,20 +246,23 @@ void setup() {
 	password = eepromReadString(EEPROM_PASS_ADDR, EEPROM_PASS_SIZE);
 	Serial.printf("PASS from EEPROM: %s\r\n", password.c_str());
 
-	wifiReconnectTimer = xTimerCreate("wifiReconnectTimer", pdMS_TO_TICKS(1000), pdTRUE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(connectToWifi));
+	wifiReconnectTimer = xTimerCreate("wifiReconnectTimer", pdMS_TO_TICKS(1*sec), pdTRUE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(connectToWifi));
 	xTimerStart(wifiReconnectTimer, 0);
 
-	clockUpdateTimer = xTimerCreate("clockUpdateTimer", pdMS_TO_TICKS(2000), pdTRUE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(updateClock));
+	clockUpdateTimer = xTimerCreate("clockUpdateTimer", pdMS_TO_TICKS(2*sec), pdTRUE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(updateClock));
 	xTimerStart(clockUpdateTimer, 0);
 
-	afterStartupTimer = xTimerCreate("afterStartupTimer", pdMS_TO_TICKS(TIMEOUT_START*1000), pdFALSE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(stopAP));
+	afterStartupTimer = xTimerCreate("afterStartupTimer", pdMS_TO_TICKS(TIMEOUT_START*sec), pdFALSE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(stopAP));
 	xTimerStart(afterStartupTimer, 0);
 
-	logStatusTimer = xTimerCreate("logStatusTimer", pdMS_TO_TICKS(1000), pdTRUE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(logStatus));
+	logStatusTimer = xTimerCreate("logStatusTimer", pdMS_TO_TICKS(6*sec), pdTRUE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(logStatus));
 	xTimerStart(logStatusTimer, 0);
 
-	mqttReconnectTimer = xTimerCreate("mqttReconnectTimer", pdMS_TO_TICKS(2000), pdFALSE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(connectToMqtt));
+	mqttReconnectTimer = xTimerCreate("mqttReconnectTimer", pdMS_TO_TICKS(2*sec), pdFALSE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(connectToMqtt));
 
+	pidControlLoopTimer = xTimerCreate("pidControlLoop", pdMS_TO_TICKS(TIMEOUT_PID_CONTROL*sec), pdTRUE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(enterPidControlLoop));
+	xTimerStart(pidControlLoopTimer, 0);
+	
 	mqttClient.onConnect(onMqttConnect);
 	mqttClient.onDisconnect(onMqttDisconnect);
 	mqttClient.onSubscribe(onMqttSubscribe);
@@ -341,9 +282,8 @@ void setup() {
 	});
 
 	server.on("/stayPut", HTTP_GET, [](AsyncWebServerRequest *request) {
-		Serial.println("Staying in startup mode for 10 more minutes. Enjoy!");
-		TIMEOUT_START = 600 * sec;
-		request->redirect("/login");
+		Serial.println("API endpoint for testing purposes. Enjoy!");
+
 	});
 
 	// handle GET request to <host>/setCredentials?ssid=<ssid>&password=<password>
@@ -377,14 +317,9 @@ void setup() {
 	// =========================================================================
 
 	pinMode(WIFI_STATUS_LED_PIN, OUTPUT);
-	pinMode(RELAY_1_PIN, OUTPUT);
-	pinMode(RELAY_2_PIN, OUTPUT);
+	pinMode(PIN_HEATER_RELAY, OUTPUT);
+	pinMode(PIN_LIGHT_RELAY, OUTPUT);
 
-	sensors.begin();
-
-	// for (int i = 0; i < NUM_SENSORS; i++) {
-	// 	sensors.setResolution(probesAddr[i], TEMPERATURE_PRECISION);
-	// }
 	// =========================================================================
 
 	server.onNotFound(notFound);
@@ -393,8 +328,114 @@ void setup() {
 	server.begin();
 }
 
+
+void enterPidControlLoop() {
+	mode |= MODE_CONTROL_LOOP; 
+}
+
+void pidControlLoop() {
+
+	int currentHour = rtc.getHour(true);
+
+	sprintf(buffer, "Devices found: %d", ds.getNumberOfDevices());
+	logMQTT("log", buffer);
+
+	sprintf(buffer, "tempProfile[%d]: %d", currentHour, tempProfile[currentHour]);
+	logMQTT("log", buffer);
+
+	// === Probing
+	lowest = 1000.0;
+	highest = -1000.0;
+	average = 0.0;
+	int probes = 0;
+	while (ds.selectNext()) {
+		float temp = ds.getTempC();
+
+		average += temp;
+
+		if (temp < lowest) {
+			lowest = temp;
+		}
+
+		if (temp > highest) {
+			highest = temp;
+		}
+
+		sprintf(buffer, "Sensor %d. Temp C: %5.3f", probes, temp);
+		logMQTT("log", buffer);
+		
+		sprintf(buffer, "%5.3f", temp);
+		logMQTT(String("p/ds18b20/"+String(probes)), buffer);
+		
+		probes++;
+	}
+	if (probes > 0) {
+		average /= probes;
+	} else {
+		average = 0;
+	}
+
+	currentTemp = average;
+
+	targetTemp = tempProfile[currentHour];
+
+	// === Controlling 
+
+	if ((probes > 0) &&						// Mustn't decide to activate heaters without sensors feedback
+		(currentTemp < targetTemp) &&		// Goal is to reach targetTemp
+		(highest < highestAllowedTemp)) {	// Mustn't exceed highest allowed temp at any sensor
+			heaterActivate();
+	} else {
+			heaterDeactivate();
+	}
+}
+
+void heaterActivate() {
+	digitalWrite(PIN_HEATER_RELAY, HIGH);
+	heaterState = HIGH;
+	logMQTT("log", "Heater activated");
+}
+
+void heaterDeactivate() {
+	digitalWrite(PIN_HEATER_RELAY, LOW);
+	heaterState = LOW;
+	logMQTT("log", "Heater deactivated");
+}
+
+void lightControlLoop() {
+	if (1 == lightProfile[rtc.getHour(true)]) {
+		lightActivate();
+	} else {
+		lightDeactivate();
+	}
+	sprintf(buffer, "esp32base/pin/%d/set", PIN_LIGHT_RELAY);
+	logMQTT(buffer, String(lightState));
+}
+
+void lightActivate() {
+	digitalWrite(PIN_LIGHT_RELAY, HIGH);
+	if (lightState == LOW) {
+		logMQTT("esp32base/log", "Light activated");
+		lightState = HIGH;
+	}
+}
+
+void lightDeactivate() {
+	digitalWrite(PIN_LIGHT_RELAY, LOW);
+	if (lightState == HIGH) {
+		logMQTT("esp32base/log", "Light deactivated");
+		lightState = LOW;
+	}
+}
+
 void loop(void) {
-	
+
+	if (mode & MODE_CONTROL_LOOP) {
+		mode ^= MODE_CONTROL_LOOP;
+		pidControlLoop();
+		lightControlLoop();
+	}
+
 }
 
 // http://esp32.local/setCredentials?ssid=guesto&password=password123
