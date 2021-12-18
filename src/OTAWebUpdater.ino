@@ -83,12 +83,11 @@ ESP32Time rtc;
 
 DS18B20 ds(ONE_WIRE_BUS);
 
-// float temperature[NUM_SENSORS];
             // Hour of the day:       0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19 20 21 22 23
 static const uint8_t tempProfile[]={ 32,33,34,35,35,35,34,34,33,33,32,32,31,30,29,28,27,26,26,26,27,29,30,31};
 
 uint8_t highestAllowedTemp  = 36;
-uint8_t defaultTemp         = 32;
+uint8_t prevTemp            = 0;
 uint8_t targetTemp          = 0;
 float currentTemp           = 0;
 float lowest                = 1000.0;
@@ -109,8 +108,7 @@ char buffer[256];
 char topicbuf[256];
 // =========================================================================
 
-void WiFiEvent(WiFiEvent_t event)
-{
+void WiFiEvent(WiFiEvent_t event) {
 	Serial.printf("[WiFi-event] event: %d\n", event);
 	switch (event) {
 	case SYSTEM_EVENT_STA_GOT_IP:
@@ -165,16 +163,22 @@ bool updateClock() {
 	return false;
 }
 
+uint16_t msgMQTT(String topic, String message) {
+	return msgMQTT(topic.c_str(), message.c_str());
+}
+uint16_t msgMQTT(const char* topic, const char* message) {
+	if (mqttClient.connected()) {
+		return mqttClient.publish(topic, 2, true, message);
+	}
+	return 0;
+}
+
 uint16_t logMQTT(String topic, String message) {
 	return logMQTT(topic.c_str(), message.c_str());
 }
 uint16_t logMQTT(const char* topic, const char* message) {
-	if (mqttClient.connected()) {	
-
-		sprintf(topicbuf, "%s/%s",MQTT_IDENT, topic);
-		return mqttClient.publish(topicbuf, 2, true, message);
-	}
-	return 0;
+	sprintf(topicbuf, "%s/%s",MQTT_IDENT, topic);
+	return msgMQTT(topicbuf, message);
 }
 
 void logStatus() {
@@ -196,6 +200,9 @@ void logStatus() {
 			lightState
 		);
 		logMQTT("csvLog", buffer);
+
+		sprintf(buffer, "%d", ESP.getFreeHeap());
+		logMQTT("freeHeap", buffer);
 	}
 }
 
@@ -325,6 +332,12 @@ void setup() {
 	server.begin();
 }
 
+// Implement mqtt messages handlers
+void handleMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties properties, size_t len, size_t index, size_t total) {
+
+	// custom handlers
+
+}
 
 void enterPidControlLoop() {
 	mode |= MODE_CONTROL_LOOP; 
@@ -363,6 +376,7 @@ void pidControlLoop() {
 		
 		sprintf(buffer, "%5.3f", temp);
 		logMQTT(String("p/ds18b20/"+String(probes)), buffer);
+		msgMQTT(String("croco/cage/raw/ds18b20/"+String(probes)), buffer);
 		
 		probes++;
 	}
@@ -374,7 +388,13 @@ void pidControlLoop() {
 
 	currentTemp = average;
 
+	sprintf(buffer, "%5.3f", currentTemp);
+	msgMQTT("croco/cage/temperature", buffer);
+
 	targetTemp = tempProfile[currentHour];
+
+	sprintf(buffer, "%d", targetTemp);
+	msgMQTT("croco/cage/targetTemperature", buffer);
 
 	// === Controlling 
 
@@ -391,12 +411,14 @@ void heaterActivate() {
 	digitalWrite(PIN_HEATER_RELAY, HIGH);
 	heaterState = HIGH;
 	logMQTT("log", "Heater activated");
+	msgMQTT("croco/cage/heater", "1");
 }
 
 void heaterDeactivate() {
 	digitalWrite(PIN_HEATER_RELAY, LOW);
 	heaterState = LOW;
 	logMQTT("log", "Heater deactivated");
+	msgMQTT("croco/cage/heater", "0");
 }
 
 void lightControlLoop() {
@@ -405,14 +427,15 @@ void lightControlLoop() {
 	} else {
 		lightDeactivate();
 	}
-	sprintf(buffer, "esp32base/pin/%d/set", PIN_LIGHT_RELAY);
+	sprintf(buffer, "pin/%d/set", PIN_LIGHT_RELAY);
 	logMQTT(buffer, String(lightState));
 }
 
 void lightActivate() {
 	digitalWrite(PIN_LIGHT_RELAY, HIGH);
 	if (lightState == LOW) {
-		logMQTT("esp32base/log", "Light activated");
+		logMQTT("log", "Light activated");
+		msgMQTT("croco/cage/light", "1");
 		lightState = HIGH;
 	}
 }
@@ -420,7 +443,8 @@ void lightActivate() {
 void lightDeactivate() {
 	digitalWrite(PIN_LIGHT_RELAY, LOW);
 	if (lightState == HIGH) {
-		logMQTT("esp32base/log", "Light deactivated");
+		logMQTT("log", "Light deactivated");
+		msgMQTT("croco/cage/light", "0");
 		lightState = LOW;
 	}
 }

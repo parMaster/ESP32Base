@@ -14,5 +14,5 @@ const char *password_start = "esp32start";
 #define MQTT_USER	"gusto"
 #define MQTT_PASS	""
 
-#define PIN_HEATER_RELAY		32
-#define PIN_LIGHT_RELAY			33
+#define PIN_HEATER_RELAY		33
+#define PIN_LIGHT_RELAY			32

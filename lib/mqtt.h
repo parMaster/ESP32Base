@@ -5,6 +5,8 @@ extern "C" {
 	#include "freertos/timers.h"
 }
 
+void handleMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties properties, size_t len, size_t index, size_t total);
+
 AsyncMqttClient mqttClient;
 TimerHandle_t mqttReconnectTimer;
 
@@ -60,6 +62,9 @@ void onMqttUnsubscribe(uint16_t packetId) {
 }
 
 void onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties properties, size_t len, size_t index, size_t total) {
+	
+	handleMqttMessage(topic, payload, properties, len, index, total);
+	
 	Serial.printf("MQTT => %s \r\n", payload);
 
 	Serial.println("Publish received.");
