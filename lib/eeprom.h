@@ -10,7 +10,7 @@ String eepromReadString(int from, int size) {
 	Serial.println(from);
 
 	for (int i = from; i < from+size; ++i) {
-		if (EEPROM.read(i) != 0) {
+		if ((EEPROM.read(i) != 0) && (EEPROM.read(i) != 255)) {
 			Serial.printf("%d \t", EEPROM.read(i));
 			result += char(EEPROM.read(i));
 		} 

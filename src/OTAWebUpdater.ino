@@ -1,4 +1,3 @@
-#include <config.h>
 #include <WiFiClient.h>
 #include <ESPmDNS.h>
 #include <AsyncTCP.h>
@@ -8,10 +7,11 @@
 #include <OneWire.h>
 #include <DS18B20.h>
 
+#include <config.h>
+
 #include <../lib/tpl.h>
 #include <../lib/eeprom.h>
 #include <../lib/mqtt.h>
-
 
 extern "C" {
 	#include "freertos/FreeRTOS.h"
@@ -39,7 +39,7 @@ TimerHandle_t pidControlLoopTimer;
 #define EEPROM_PASS_ADDR 33		// Bytes 33:97 store wifi password
 #define EEPROM_PASS_SIZE 64		// 64 bytes long
 
-int TIMEOUT_START = 10;
+int TIMEOUT_START = 360;
 
 const int tickMS = 1;
 const int sec = int(1000/tickMS); // msec/sec ratio
@@ -52,8 +52,8 @@ String password = "";
 #define MODE_CONNECTED				2
 #define MODE_TIMESET				4
 #define MODE_RSRVD8				 	8
-#define MODE_RSRVD16				16
-#define MODE_CONTROL_LOOP			32
+#define MODE_SECONDS_LOOP			16 // every second loop
+#define MODE_CONTROL_LOOP			32 // every TIMEOUT_PID_CONTROL seconds loop
 volatile byte mode = MODE_STARTUP;
 /*
 	Set bit			mode |= MODE_STARTUP; 
@@ -76,9 +76,8 @@ NTPClient timeClient(ntpUDP);
 ESP32Time rtc;
 
 // =========================================================================
-
 // PINS 
-#define ONE_WIRE_BUS 		21 // GPIO 21
+#define ONE_WIRE_BUS 		21
 #define WIFI_STATUS_LED_PIN 2
 
 DS18B20 ds(ONE_WIRE_BUS);
@@ -87,12 +86,17 @@ DS18B20 ds(ONE_WIRE_BUS);
 static const uint8_t tempProfile[]={ 32,33,34,35,35,35,34,34,33,33,32,32,31,30,29,28,27,26,26,26,27,29,30,31};
 
 uint8_t highestAllowedTemp  = 36;
-uint8_t prevTemp            = 0;
 uint8_t targetTemp          = 0;
 float currentTemp           = 0;
 float lowest                = 1000.0;
-float highest               = -1000.0;
+float highest               = -1.0;
 float average               = 0.0;
+
+long TEMP_TTL = 60; //seconds temp reading is still fresh
+volatile long lastValidReadingTimestamp = 0;
+
+#define TEMPH_SIZE 10 // TEMPerature History SIZE
+float tempHist[TEMPH_SIZE];
 
 byte heaterState = LOW;
 void heaterActivate();
@@ -138,7 +142,7 @@ bool connectToWifi() {
 		Serial.printf("Connecting to WiFi: %s:%s \n\r", ssid.c_str(), password.c_str());
 		while (WiFi.status() != WL_CONNECTED && (i < 10)) {
 			i++;
-			delay(1 * sec);
+			delay(5 * sec);
 			Serial.print(i);
 		}
 		Serial.printf("WiFi.status(): %d\r\n", WiFi.status());
@@ -189,12 +193,12 @@ void logStatus() {
 		Serial.println(rtc.getTime("%A, %B %d %Y %H:%M:%S"));
 
 		// CSV Line
-		// Y-m-d H:m:s ; T lowest; T highest; T average; T target; heater state; light state
-		sprintf(buffer, "%s; %3.2f; %3.2f; %3.2f; %d; %d; %d", 
+		// Y-m-d H:m:s ; T lowest; T highest; T moving average; T fib MA 10; T target; heater state; light state
+		sprintf(buffer, "%s; %2.3f; %2.3f; %2.3f; %d; %d; %d", 
 			rtc.getTime("%Y-%m-%d %H:%M:%S").c_str(),
-			lowest,
 			highest,
-			average,
+			getWeighedMA5Temp(),
+			getFibWeighedMA10Temp(),
 			targetTemp,
 			heaterState,
 			lightState
@@ -203,6 +207,9 @@ void logStatus() {
 
 		sprintf(buffer, "%d", ESP.getFreeHeap());
 		logMQTT("freeHeap", buffer);
+
+		sprintf(buffer, "%ld", secSinceValidReading());
+		logMQTT("sinceLastValidReading", buffer);
 	}
 }
 
@@ -224,6 +231,10 @@ void notFound(AsyncWebServerRequest *request) {
 
 void setup() {
 	Serial.begin(115200);
+
+	uint64_t chipid = ESP.getEfuseMac(); // The chip ID is essentially its MAC address(length: 6 bytes).
+	uint16_t chip = (uint16_t)(chipid >> 32);
+	sprintf(MQTT_IDENT, "ESP32-%04X%08X", chip, (uint32_t)chipid);
 
 	// #ifdef M5Dev
 	// M5.begin();
@@ -266,7 +277,9 @@ void setup() {
 
 	pidControlLoopTimer = xTimerCreate("pidControlLoop", pdMS_TO_TICKS(TIMEOUT_PID_CONTROL*sec), pdTRUE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(enterPidControlLoop));
 	xTimerStart(pidControlLoopTimer, 0);
-	
+
+	xTimerStart(xTimerCreate("enterSecondsControlLoop", pdMS_TO_TICKS(1*sec), pdTRUE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(enterSecondsControlLoop)), 0);
+
 	mqttClient.onConnect(onMqttConnect);
 	mqttClient.onDisconnect(onMqttDisconnect);
 	mqttClient.onSubscribe(onMqttSubscribe);
@@ -324,6 +337,8 @@ void setup() {
 	pinMode(PIN_HEATER_RELAY, OUTPUT);
 	pinMode(PIN_LIGHT_RELAY, OUTPUT);
 
+	sprintf(buffer, "MQTT_IDENT: %s", MQTT_IDENT);
+	Serial.println(buffer);
 	// =========================================================================
 
 	server.onNotFound(notFound);
@@ -334,9 +349,112 @@ void setup() {
 
 // Implement mqtt messages handlers
 void handleMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties properties, size_t len, size_t index, size_t total) {
-
 	// custom handlers
+}
 
+void enterSecondsControlLoop() {
+	mode |= MODE_SECONDS_LOOP; 
+}
+
+// isTempValid - basic temperature readings validation
+bool isTempValid(float temp) {
+	if (
+		(temp > 9) &&
+		(temp < 50)
+	) {
+		return true;
+	}
+	return false;
+}
+
+// returns number of seconds from last valid temperature reading
+long secSinceValidReading() {
+	if ((lastValidReadingTimestamp != 0) && 
+		(MODE_TIMESET == (mode & MODE_TIMESET))) {
+
+		return rtc.getEpoch() - lastValidReadingTimestamp;
+	}
+	return LONG_MAX;
+}
+
+// getWeighedMA5Temp - returns moving average temperature based on 5 last readings
+// most recent readings are x5, x3, x2 their respective weights
+float getWeighedMA5Temp() {
+	return (
+		tempHist[0] * 5 + 
+		tempHist[1] * 3 + 
+		tempHist[2] * 2 + 
+		tempHist[3] * 1 + 
+		tempHist[4] * 1  
+	) / 12;
+}
+
+// getWeighedMATemp - returns weighed moving average temperature over 10 last readings max
+// weights are Fibonacci-weighed so the recent ones are heavier
+float getFibWeighedMA10Temp() {
+	return (
+		tempHist[0] * 55 + 
+		tempHist[1] * 34 + 
+		tempHist[2] * 21 + 
+		tempHist[3] * 13 + 
+		tempHist[4] * 8 + 
+		tempHist[5] * 5 + 
+		tempHist[6] * 3 + 
+		tempHist[7] * 2 + 
+		tempHist[8] * 1 + 
+		tempHist[9] * 1  
+	) / 143;
+}
+
+// get moving average temperature over `n` last records
+float getMATemp(int n=0) {
+	float sum = 0;
+
+	n = min(max(1,n), TEMPH_SIZE); // make sure 0<n<=TEMPH_SIZE
+	
+	for (int i=0; i<n; i++) {
+		sum+=tempHist[i];
+	}
+	return sum/n;
+}
+
+// probeTemperature - poll the probes, save results
+float probeTemperature() {
+	highest = -1.0;
+	int probes = 0;
+
+	ds.resetSearch();
+	while (ds.selectNext()) {
+		float temp = ds.getTempC();
+
+		if (isTempValid(temp)) {
+			for (int i=0; i < (TEMPH_SIZE-1); i++) {
+				tempHist[i+1] = tempHist[i];
+			}
+			tempHist[0] = temp;
+
+			if (temp > highest) {
+				highest = temp;
+			}
+
+			if (MODE_TIMESET == (mode & MODE_TIMESET)) {
+				lastValidReadingTimestamp = rtc.getEpoch();
+			}
+			probes++;
+		}
+
+		sprintf(buffer, "Sensor %d. Temp C: %2.2f", probes, temp);
+		logMQTT("log", buffer);
+		
+		sprintf(buffer, "%2.2f", temp);
+		msgMQTT(String("p/ds18b20"), buffer);
+	}
+
+	return (probes > 0);
+}
+
+float getCurrentTemperature() {
+	return getFibWeighedMA10Temp();
 }
 
 void enterPidControlLoop() {
@@ -347,60 +465,36 @@ void pidControlLoop() {
 
 	int currentHour = rtc.getHour(true);
 
-	sprintf(buffer, "Devices found: %d", ds.getNumberOfDevices());
-	logMQTT("log", buffer);
+	// sprintf(buffer, "Devices found: %d", ds.getNumberOfDevices());
+	// logMQTT("log", buffer);
 
-	sprintf(buffer, "tempProfile[%d]: %d", currentHour, tempProfile[currentHour]);
-	logMQTT("log", buffer);
+	// sprintf(buffer, "tempProfile[%d]: %d", currentHour, tempProfile[currentHour]);
+	// logMQTT("log", buffer);
 
-	// === Probing
-	lowest = 1000.0;
-	highest = -1000.0;
-	average = 0.0;
-	int probes = 0;
-	while (ds.selectNext()) {
-		float temp = ds.getTempC();
+	sprintf(buffer, "%2.3f", getMATemp());
+	logMQTT("getMATemp", buffer);
 
-		average += temp;
+	sprintf(buffer, "%2.3f", getFibWeighedMA10Temp());
+	logMQTT("getFibWeighedMA10Temp", buffer);
 
-		if (temp < lowest) {
-			lowest = temp;
-		}
-
-		if (temp > highest) {
-			highest = temp;
-		}
-
-		sprintf(buffer, "Sensor %d. Temp C: %5.3f", probes, temp);
-		logMQTT("log", buffer);
-		
-		sprintf(buffer, "%5.3f", temp);
-		logMQTT(String("p/ds18b20/"+String(probes)), buffer);
-		msgMQTT(String("croco/cage/raw/ds18b20/"+String(probes)), buffer);
-		
-		probes++;
-	}
-	if (probes > 0) {
-		average /= probes;
-	} else {
-		average = 0;
-	}
-
-	currentTemp = average;
+	sprintf(buffer, "%2.3f", getWeighedMA5Temp());
+	logMQTT("getWeighedMA5Temp", buffer);
 
 	sprintf(buffer, "%5.3f", currentTemp);
 	msgMQTT("croco/cage/temperature", buffer);
 
+	currentTemp = getCurrentTemperature();
+
+	// === Controlling 
 	targetTemp = tempProfile[currentHour];
 
 	sprintf(buffer, "%d", targetTemp);
 	msgMQTT("croco/cage/targetTemperature", buffer);
 
-	// === Controlling 
-
-	if ((probes > 0) &&						// Mustn't decide to activate heaters without sensors feedback
-		(currentTemp < targetTemp) &&		// Goal is to reach targetTemp
-		(highest < highestAllowedTemp)) {	// Mustn't exceed highest allowed temp at any sensor
+	if (
+		(secSinceValidReading() < TEMP_TTL) && 	// temp reading is still fresh
+		(currentTemp < targetTemp) &&			// Goal is to reach targetTemp
+		(highest < highestAllowedTemp)) {		// Mustn't exceed highest allowed temp at any sensor
 			heaterActivate();
 	} else {
 			heaterDeactivate();
@@ -457,6 +551,10 @@ void loop(void) {
 		lightControlLoop();
 	}
 
+	if (mode & MODE_SECONDS_LOOP) {
+		mode ^= MODE_SECONDS_LOOP;
+		probeTemperature();
+	}
 }
 
 // http://esp32.local/setCredentials?ssid=guesto&password=password123

@@ -26,6 +26,8 @@ void onMqttConnect(bool sessionPresent) {
 	Serial.println("Connected to MQTT");
 	Serial.print("Session present: ");
 	Serial.println(sessionPresent);
+	mqttClient.publish("esp32base/log/connected", 0, true, MQTT_IDENT);
+
 	// uint16_t packetIdSub = mqttClient.subscribe("esp32base/log", 2);
 	// Serial.print("Subscribing at QoS 2, packetId: ");
 	// Serial.println(packetIdSub);
