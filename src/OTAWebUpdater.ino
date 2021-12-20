@@ -75,6 +75,11 @@ NTPClient timeClient(ntpUDP);
 #include <ESP32Time.h>
 ESP32Time rtc;
 
+char MQTT_IDENT[18];
+// M5: ESP32-344E3D8E0D84
+// CAM:
+// DOIT: ESP32-A473F53A7D80
+
 // =========================================================================
 // PINS 
 #define ONE_WIRE_BUS 		21

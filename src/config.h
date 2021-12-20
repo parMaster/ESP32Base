@@ -13,10 +13,7 @@ const char *password_start = "esp32start";
 #define MQTT_PORT	1883
 #define MQTT_USER	"gusto"
 #define MQTT_PASS	""
-char MQTT_IDENT[18];
-// M5: ESP32-344E3D8E0D84
-// CAM:
-// DOIT: ESP32-A473F53A7D80
+
 
 #define PIN_HEATER_RELAY		33
 #define PIN_LIGHT_RELAY			32
