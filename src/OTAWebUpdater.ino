@@ -502,17 +502,21 @@ void pidControlLoop() {
 }
 
 void heaterActivate() {
-	digitalWrite(PIN_HEATER_RELAY, HIGH);
-	heaterState = HIGH;
-	logMQTT("log", "Heater activated");
-	msgMQTT("croco/cage/heater", "1");
+	if (LOW == heaterState) {
+		heaterState = HIGH;
+		digitalWrite(PIN_HEATER_RELAY, HIGH);
+		logMQTT("log", "Heater activated");
+		msgMQTT("croco/cage/heater", "1");
+	} // else - already HIGH
 }
 
 void heaterDeactivate() {
-	digitalWrite(PIN_HEATER_RELAY, LOW);
-	heaterState = LOW;
-	logMQTT("log", "Heater deactivated");
-	msgMQTT("croco/cage/heater", "0");
+	if (HIGH == heaterState) {
+		heaterState = LOW;
+		digitalWrite(PIN_HEATER_RELAY, LOW);
+		logMQTT("log", "Heater deactivated");
+		msgMQTT("croco/cage/heater", "0");
+	} // else - already LOW
 }
 
 void lightControlLoop() {
