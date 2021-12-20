@@ -481,7 +481,7 @@ void pidControlLoop() {
 	logMQTT("getWeighedMA5Temp", buffer);
 
 	sprintf(buffer, "%5.3f", currentTemp);
-	msgMQTT("croco/cage/temperature", buffer);
+	msgMQTT("croco/cave/temperature", buffer);
 
 	currentTemp = getCurrentTemperature();
 
@@ -489,7 +489,7 @@ void pidControlLoop() {
 	targetTemp = tempProfile[currentHour];
 
 	sprintf(buffer, "%d", targetTemp);
-	msgMQTT("croco/cage/targetTemperature", buffer);
+	msgMQTT("croco/cave/targetTemperature", buffer);
 
 	if (
 		(secSinceValidReading() < TEMP_TTL) && 	// temp reading is still fresh
@@ -506,7 +506,7 @@ void heaterActivate() {
 		heaterState = HIGH;
 		digitalWrite(PIN_HEATER_RELAY, HIGH);
 		logMQTT("log", "Heater activated");
-		msgMQTT("croco/cage/heater", "1");
+		msgMQTT("croco/cave/heater", "1");
 	} // else - already HIGH
 }
 
@@ -515,7 +515,7 @@ void heaterDeactivate() {
 		heaterState = LOW;
 		digitalWrite(PIN_HEATER_RELAY, LOW);
 		logMQTT("log", "Heater deactivated");
-		msgMQTT("croco/cage/heater", "0");
+		msgMQTT("croco/cave/heater", "0");
 	} // else - already LOW
 }
 
@@ -533,7 +533,7 @@ void lightActivate() {
 	digitalWrite(PIN_LIGHT_RELAY, HIGH);
 	if (lightState == LOW) {
 		logMQTT("log", "Light activated");
-		msgMQTT("croco/cage/light", "1");
+		msgMQTT("croco/cave/light", "1");
 		lightState = HIGH;
 	}
 }
@@ -542,7 +542,7 @@ void lightDeactivate() {
 	digitalWrite(PIN_LIGHT_RELAY, LOW);
 	if (lightState == HIGH) {
 		logMQTT("log", "Light deactivated");
-		msgMQTT("croco/cage/light", "0");
+		msgMQTT("croco/cave/light", "0");
 		lightState = LOW;
 	}
 }
