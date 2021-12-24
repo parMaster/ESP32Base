@@ -18,5 +18,4 @@ TBD:
 - Total control with a Telegram bot MQTT client (telegram publisher to MQTT is behind the scope of ESP32Base)
 
 Dashboard set up using data reported to MQTT:
-
-![croco](https://user-images.githubusercontent.com/1956191/147354873-b50971ee-0cb9-4406-a792-29c2b9458ce8.jpeg)
+![IMG_2198](https://user-images.githubusercontent.com/1956191/147356100-d16561d5-d982-4604-9525-020311b38f25.PNG)
