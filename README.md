@@ -3,9 +3,9 @@
 MUST haves:
 + Async web server
 + OTA Update (AsyncElegantOTA)
-+ WiFi access point for limited time after device startup - providing a web form to enter Internet AP credentials.
-+ Storing credentials to eeprom with _simple and clear API_
-+ **Occasional Online** mode - Internet connection can't be relied upon, device must manage reconnects to WiFi AP.
++ WiFi access point for limited time after device startup - providing a web form to enter Internet AP credentials
++ Storing credentials to EEPROM with _simple and clear API_
++ **Occasional Online** mode - Internet connection can't be relied upon, device must manage reconnects to WiFi AP
 + No ESP-IDF, only VSCode and PlatformIO required
 
 Good to haves:
