@@ -1,3 +1,5 @@
+#include <main_config.h>
+
 #include <WiFiClient.h>
 #include <ESPmDNS.h>
 #include <AsyncTCP.h>
@@ -7,61 +9,39 @@
 #include <OneWire.h>
 #include <DS18B20.h>
 
-#include <config.h>
-
-#include <../lib/tpl.h>
 #include <../lib/eeprom.h>
-#include <../lib/mqtt.h>
+#include <../lib/tpl.h>
 
 extern "C" {
 	#include "freertos/FreeRTOS.h"
 	#include "freertos/timers.h"
 }
 
-TimerHandle_t wifiReconnectTimer;
-TimerHandle_t clockUpdateTimer;
-TimerHandle_t afterStartupTimer;
-TimerHandle_t logStatusTimer;
-TimerHandle_t pidControlLoopTimer;
-
-// #define M5Dev
-#ifdef M5Dev
-#include <M5Stack.h>
-#endif
-
-#define EEPROM_SIZE		 128	// 128 bytes total
-#define EEPROM_RESV_ADDR 0		// first byte reserved for init flag
-#define EEPROM_RESV_SIZE 1		// 
-
-#define EEPROM_SSID_ADDR 1		// Bytes 1:32 store wifi SSID
-#define EEPROM_SSID_SIZE 32		// 32 bytes long SSID
-
-#define EEPROM_PASS_ADDR 33		// Bytes 33:97 store wifi password
-#define EEPROM_PASS_SIZE 64		// 64 bytes long
-
-int TIMEOUT_START = 360;
-
 const int tickMS = 1;
 const int sec = int(1000/tickMS); // msec/sec ratio
 
-String ssid = "";
-String password = "";
+TimerHandle_t timerSeconds;
+TimerHandle_t timerAfterStartup;
+TimerHandle_t timerLogStatus;
+TimerHandle_t timerControl;
+TimerHandle_t timerMqttMaintainConnect;
 
 // RUN MODES 
 #define MODE_STARTUP 				1
-#define MODE_CONNECTED				2
+#define MODE_LOG					2
 #define MODE_TIMESET				4
-#define MODE_RSRVD8				 	8
+#define MODE_RSRVD				 	8
 #define MODE_SECONDS_LOOP			16 // every second loop
 #define MODE_CONTROL_LOOP			32 // every TIMEOUT_PID_CONTROL seconds loop
+#define MODE_EXAMPLE				64
 volatile byte mode = MODE_STARTUP;
 /*
-	Set bit			mode |= MODE_STARTUP; 
-	Toggle bit		mode ^= MODE_STARTUP;
-	Unset bit		mode &= ~MODE_STARTUP;
+	Set bit			mode |= MODE_EXAMPLE; 
+	Toggle bit		mode ^= MODE_EXAMPLE;
+	Unset bit		mode &= ~MODE_EXAMPLE;
 
-	if (mode & MODE_STARTUP) {
-		mode ^= MODE_STARTUP;
+	if (mode & MODE_EXAMPLE) {
+		mode ^= MODE_EXAMPLE;
 	}
 */
 
@@ -75,10 +55,14 @@ NTPClient timeClient(ntpUDP);
 #include <ESP32Time.h>
 ESP32Time rtc;
 
-char MQTT_IDENT[18];
-// M5: ESP32-344E3D8E0D84
-// CAM:
-// DOIT: ESP32-A473F53A7D80
+String ssid = "";
+String password = "";
+
+#include <AsyncMqttClient.h>
+AsyncMqttClient mqttClient;
+
+char buffer[256];
+char topicbuf[256];
 
 // =========================================================================
 // PINS 
@@ -93,7 +77,7 @@ static const uint8_t tempProfile[]={ 32,33,34,35,35,35,34,34,33,33,32,32,31,30,2
 uint8_t highestAllowedTemp  = 36;
 uint8_t targetTemp          = 0;
 float currentTemp           = 0;
-float lowest                = 1000.0;
+float lowest                = 99.0;
 float highest               = -1.0;
 float average               = 0.0;
 
@@ -112,114 +96,24 @@ static const byte lightProfile[]={ 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 
 byte lightState = LOW;
 void lightActivate();
 void lightDeactivate();
-
-char buffer[256];
-char topicbuf[256];
 // =========================================================================
 
 void WiFiEvent(WiFiEvent_t event) {
 	Serial.printf("[WiFi-event] event: %d\n", event);
 	switch (event) {
 	case SYSTEM_EVENT_STA_GOT_IP:
-		Serial.println("WiFi connected");
-		Serial.println("IP address: ");
+		Serial.println("WiFi connected, got IP: ");
 		Serial.println(WiFi.localIP());
-		connectToMqtt();
+		xTimerStart(timerMqttMaintainConnect, 1*sec);
 		break;
 	case SYSTEM_EVENT_STA_DISCONNECTED:
 		Serial.println("WiFi lost connection");
-		xTimerStart(wifiReconnectTimer, 0);
-		xTimerStop(mqttReconnectTimer, 0); // ensure we don't reconnect to MQTT while reconnecting to Wi-Fi
-		xTimerStop(clockUpdateTimer, 0);
+		xTimerStop(timerMqttMaintainConnect, 0);
 		break;
 	case SYSTEM_EVENT_STA_CONNECTED:
-		xTimerStop(wifiReconnectTimer, 0);
-		xTimerStart(mqttReconnectTimer, 0);
-		xTimerStart(clockUpdateTimer, 0);
+		Serial.println("WiFi connected");
 		break;
 	}
-}
-
-bool connectToWifi() {
-	if ((WiFi.status() != WL_CONNECTED) && ssid.length() > 1 && password.length() > 1) {
-		int i = 0;
-		WiFi.begin(ssid.c_str(), password.c_str());
-		Serial.printf("Connecting to WiFi: %s:%s \n\r", ssid.c_str(), password.c_str());
-		while (WiFi.status() != WL_CONNECTED && (i < 10)) {
-			i++;
-			delay(5 * sec);
-			Serial.print(i);
-		}
-		Serial.printf("WiFi.status(): %d\r\n", WiFi.status());
-	}
-
-	// Indicate WiFi connection with a blue LED on WROOM board 
-	digitalWrite(WIFI_STATUS_LED_PIN, (WiFi.status() == WL_CONNECTED)?HIGH:LOW);
-
-	return (WiFi.status() == WL_CONNECTED);
-}
-
-bool updateClock() {
-	if (WiFi.status() == WL_CONNECTED) {	
-		if (!timeClient.update()) {
-			timeClient.forceUpdate();
-		} else {
-			rtc.setTime(timeClient.getEpochTime());
-			mode |= MODE_TIMESET;
-			return true;
-		}
-	}
-	return false;
-}
-
-uint16_t msgMQTT(String topic, String message) {
-	return msgMQTT(topic.c_str(), message.c_str());
-}
-uint16_t msgMQTT(const char* topic, const char* message) {
-	if (mqttClient.connected()) {
-		return mqttClient.publish(topic, 2, true, message);
-	}
-	return 0;
-}
-
-uint16_t logMQTT(String topic, String message) {
-	return logMQTT(topic.c_str(), message.c_str());
-}
-uint16_t logMQTT(const char* topic, const char* message) {
-	sprintf(topicbuf, "%s/%s",MQTT_IDENT, topic);
-	return msgMQTT(topicbuf, message);
-}
-
-void logStatus() {
-
-	Serial.print(timeClient.getFormattedTime());
-	Serial.print(" ");
-	if (MODE_TIMESET == (mode & MODE_TIMESET)) {
-		Serial.println(rtc.getTime("%A, %B %d %Y %H:%M:%S"));
-
-		// CSV Line
-		// Y-m-d H:m:s ; T lowest; T highest; T moving average; T fib MA 10; T target; heater state; light state
-		sprintf(buffer, "%s; %2.3f; %2.3f; %2.3f; %d; %d; %d", 
-			rtc.getTime("%Y-%m-%d %H:%M:%S").c_str(),
-			highest,
-			getWeighedMA5Temp(),
-			getFibWeighedMA10Temp(),
-			targetTemp,
-			heaterState,
-			lightState
-		);
-		logMQTT("csvLog", buffer);
-
-		sprintf(buffer, "%d", ESP.getFreeHeap());
-		logMQTT("freeHeap", buffer);
-
-		sprintf(buffer, "%ld", secSinceValidReading());
-		logMQTT("sinceLastValidReading", buffer);
-	}
-}
-
-void afterStartup() {
-	stopAP();
 }
 
 void stopAP() {
@@ -227,7 +121,6 @@ void stopAP() {
 	Serial.printf("Stopping softAP...\r\n");
 	mode ^= MODE_STARTUP;
 	WiFi.softAPdisconnect(true);
-	delay(100);
 }
 
 void notFound(AsyncWebServerRequest *request) {
@@ -237,14 +130,13 @@ void notFound(AsyncWebServerRequest *request) {
 void setup() {
 	Serial.begin(115200);
 
+	WiFi.disconnect(true);
+
 	uint64_t chipid = ESP.getEfuseMac(); // The chip ID is essentially its MAC address(length: 6 bytes).
 	uint16_t chip = (uint16_t)(chipid >> 32);
-	sprintf(MQTT_IDENT, "ESP32-%04X%08X", chip, (uint32_t)chipid);
-
-	// #ifdef M5Dev
-	// M5.begin();
-	// M5.Power.begin();
-	// #endif
+	sprintf(IDENT, "ESP32-%04X%08X", chip, (uint32_t)chipid);
+	sprintf(buffer, "IDENT: %s", IDENT);
+	Serial.println(buffer);
 
 	WiFi.mode(WIFI_MODE_APSTA);
 	WiFi.softAP(ssid_start, password_start);
@@ -266,38 +158,30 @@ void setup() {
 	password = eepromReadString(EEPROM_PASS_ADDR, EEPROM_PASS_SIZE);
 	Serial.printf("PASS from EEPROM: %s\r\n", password.c_str());
 
-	wifiReconnectTimer = xTimerCreate("wifiReconnectTimer", pdMS_TO_TICKS(1*sec), pdTRUE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(connectToWifi));
-	xTimerStart(wifiReconnectTimer, 0);
+	timerAfterStartup = xTimerCreate("timerAfterStartup", pdMS_TO_TICKS(TIMEOUT_START*sec), pdFALSE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(stopAP));
+	xTimerStart(timerAfterStartup, TIMEOUT_START*sec);
 
-	clockUpdateTimer = xTimerCreate("clockUpdateTimer", pdMS_TO_TICKS(2*sec), pdTRUE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(updateClock));
-	xTimerStart(clockUpdateTimer, 0);
+	timerSeconds = xTimerCreate("timerSeconds", pdMS_TO_TICKS(1*sec), pdTRUE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(timerSecondsHandler));
+	xTimerStart(timerSeconds, 15*sec);
 
-	afterStartupTimer = xTimerCreate("afterStartupTimer", pdMS_TO_TICKS(TIMEOUT_START*sec), pdFALSE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(stopAP));
-	xTimerStart(afterStartupTimer, 0);
+	timerLogStatus = xTimerCreate("timerLogStatus", pdMS_TO_TICKS(TIMEOUT_LOG_STATUS*sec), pdTRUE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(timerLogStatusHandler));
+	xTimerStart(timerLogStatus, 20*sec);
 
-	logStatusTimer = xTimerCreate("logStatusTimer", pdMS_TO_TICKS(6*sec), pdTRUE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(logStatus));
-	xTimerStart(logStatusTimer, 0);
+	timerControl = xTimerCreate("timerControl", pdMS_TO_TICKS(TIMEOUT_CONTROL*sec), pdTRUE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(timerControlHandler));
+	xTimerStart(timerControl, 22*sec);
 
-	mqttReconnectTimer = xTimerCreate("mqttReconnectTimer", pdMS_TO_TICKS(2*sec), pdFALSE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(connectToMqtt));
+	timerMqttMaintainConnect = xTimerCreate("timerMqttMaintainConnect", pdMS_TO_TICKS(10*sec), pdTRUE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(timerMqttMaintainConnectHandler));
 
-	pidControlLoopTimer = xTimerCreate("pidControlLoop", pdMS_TO_TICKS(TIMEOUT_PID_CONTROL*sec), pdTRUE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(enterPidControlLoop));
-	xTimerStart(pidControlLoopTimer, 0);
-
-	xTimerStart(xTimerCreate("enterSecondsControlLoop", pdMS_TO_TICKS(1*sec), pdTRUE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(enterSecondsControlLoop)), 0);
-
-	mqttClient.onConnect(onMqttConnect);
-	mqttClient.onDisconnect(onMqttDisconnect);
-	mqttClient.onSubscribe(onMqttSubscribe);
-	mqttClient.onUnsubscribe(onMqttUnsubscribe);
-	mqttClient.onMessage(onMqttMessage);
-	mqttClient.onPublish(onMqttPublish);
+	WiFi.begin(ssid.c_str(), password.c_str());
+	WiFi.onEvent(WiFiEvent);
+	WiFi.waitForConnectResult();
+	Serial.println(WiFi.dnsIP());
+	WiFi.config(WiFi.localIP(), WiFi.gatewayIP(), WiFi.subnetMask(), IPAddress(8,8,8,8)); 
+	delay(10);
+	Serial.println(WiFi.dnsIP());
+	
 	mqttClient.setCredentials(MQTT_USER, MQTT_PASS);
 	mqttClient.setServer(MQTT_HOST, MQTT_PORT);
-
-	WiFi.onEvent(WiFiEvent);
-
-	timeClient.begin();
-	timeClient.setTimeOffset(TIMEZONE_OFFSET);
 
 	server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
 			  { request->redirect("/loginForm"); 
@@ -337,29 +221,73 @@ void setup() {
 	});
 
 	// =========================================================================
-
 	pinMode(WIFI_STATUS_LED_PIN, OUTPUT);
 	pinMode(PIN_HEATER_RELAY, OUTPUT);
 	pinMode(PIN_LIGHT_RELAY, OUTPUT);
 
-	sprintf(buffer, "MQTT_IDENT: %s", MQTT_IDENT);
-	Serial.println(buffer);
+	Serial.print("MQTT_IDENT: ");
+	Serial.println(IDENT);
 	// =========================================================================
 
 	server.onNotFound(notFound);
 
 	AsyncElegantOTA.begin(&server);
 	server.begin();
+
+	timeClient.begin();
+	timeClient.setTimeOffset(TIMEZONE_OFFSET);
 }
 
-// Implement mqtt messages handlers
-void handleMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties properties, size_t len, size_t index, size_t total) {
-	// custom handlers
+uint16_t msgMQTT(String topic, String message) {
+	return msgMQTT(topic.c_str(), message.c_str());
+}
+uint16_t msgMQTT(const char* topic, const char* message) {
+	if (mqttClient.connected()) {
+		return mqttClient.publish(topic, 2, true, message);
+	}
+	return 0;
 }
 
-void enterSecondsControlLoop() {
-	mode |= MODE_SECONDS_LOOP; 
+uint16_t logMQTT(String topic, String message) {
+	return logMQTT(topic.c_str(), message.c_str());
 }
+uint16_t logMQTT(const char* topic, const char* message) {
+	sprintf(topicbuf, "%s/%s",IDENT, topic);
+	return msgMQTT(topicbuf, message);
+}
+
+void timerMqttMaintainConnectHandler() {
+	if (WiFi.isConnected() && !mqttClient.connected()) {
+		mqttClient.connect();
+	}
+}
+
+void timerLogStatusHandler() {
+	mode |= MODE_LOG;
+}
+
+void loopLog() {
+	Serial.println("loopLog(): called");
+
+	// CSV Line
+	// Y-m-d H:m:s ; T lowest; T highest; T moving average; T fib MA 10; T target; heater state; light state
+	sprintf(buffer, "%s; %2.3f; %2.3f; %2.3f; %d; %d; %d", 
+		rtc.getTime("%Y-%m-%d %H:%M:%S").c_str(),
+		highest,
+		getWeighedMA5Temp(),
+		getFibWeighedMA10Temp(),
+		targetTemp,
+		heaterState,
+		lightState
+	);
+	logMQTT("csvLog", buffer);
+
+	sprintf(buffer, "%d", ESP.getFreeHeap());
+	logMQTT("freeHeap", buffer);
+	sprintf(buffer, "%ld", secSinceValidReading());
+	logMQTT("sinceLastValidReading", buffer);
+}
+
 
 // isTempValid - basic temperature readings validation
 bool isTempValid(float temp) {
@@ -448,61 +376,19 @@ float probeTemperature() {
 			probes++;
 		}
 
-		sprintf(buffer, "Sensor %d. Temp C: %2.2f", probes, temp);
-		logMQTT("log", buffer);
-		
-		sprintf(buffer, "%2.2f", temp);
-		msgMQTT(String("p/ds18b20"), buffer);
+		sprintf(topicbuf, "%s/p/ds18b20/%d", IDENT, probes);
+		sprintf(buffer, "%2.3f", temp);
+		msgMQTT(topicbuf, buffer);
 	}
 
 	return (probes > 0);
 }
 
 float getCurrentTemperature() {
-	return getFibWeighedMA10Temp();
-}
-
-void enterPidControlLoop() {
-	mode |= MODE_CONTROL_LOOP; 
-}
-
-void pidControlLoop() {
-
-	int currentHour = rtc.getHour(true);
-
-	// sprintf(buffer, "Devices found: %d", ds.getNumberOfDevices());
-	// logMQTT("log", buffer);
-
-	// sprintf(buffer, "tempProfile[%d]: %d", currentHour, tempProfile[currentHour]);
-	// logMQTT("log", buffer);
-
-	sprintf(buffer, "%2.3f", getMATemp());
-	logMQTT("getMATemp", buffer);
-
-	sprintf(buffer, "%2.3f", getFibWeighedMA10Temp());
-	logMQTT("getFibWeighedMA10Temp", buffer);
-
-	sprintf(buffer, "%2.3f", getWeighedMA5Temp());
-	logMQTT("getWeighedMA5Temp", buffer);
-
-	sprintf(buffer, "%5.3f", currentTemp);
-	msgMQTT("croco/cave/temperature", buffer);
-
-	currentTemp = getCurrentTemperature();
-
-	// === Controlling 
-	targetTemp = tempProfile[currentHour];
-
-	sprintf(buffer, "%d", targetTemp);
-	msgMQTT("croco/cave/targetTemperature", buffer);
-
-	if (
-		(secSinceValidReading() < TEMP_TTL) && 	// temp reading is still fresh
-		(currentTemp < targetTemp) &&			// Goal is to reach targetTemp
-		(highest < highestAllowedTemp)) {		// Mustn't exceed highest allowed temp at any sensor
-			heaterActivate();
+	if (secSinceValidReading() < TEMP_TTL) {
+		return getFibWeighedMA10Temp();
 	} else {
-			heaterDeactivate();
+		return 99;
 	}
 }
 
@@ -524,16 +410,6 @@ void heaterDeactivate() {
 	} // else - already LOW
 }
 
-void lightControlLoop() {
-	if (1 == lightProfile[rtc.getHour(true)]) {
-		lightActivate();
-	} else {
-		lightDeactivate();
-	}
-	sprintf(buffer, "pin/%d/set", PIN_LIGHT_RELAY);
-	logMQTT(buffer, String(lightState));
-}
-
 void lightActivate() {
 	digitalWrite(PIN_LIGHT_RELAY, HIGH);
 	if (lightState == LOW) {
@@ -552,18 +428,92 @@ void lightDeactivate() {
 	}
 }
 
+void timerSecondsHandler() {
+	mode |= MODE_SECONDS_LOOP;
+}
+
+void loopSeconds() {
+	rtc.setTime(timeClient.getEpochTime());
+	probeTemperature();
+	Serial.println(rtc.getTime("%Y-%m-%d %H:%M:%S").c_str());
+}
+
+void timerControlHandler() {
+	mode |= MODE_CONTROL_LOOP;
+}
+
+void loopControl() {
+	// Serial.println("loopControl(): called");
+	if (mode & MODE_TIMESET) {
+
+		int currentHour = rtc.getHour(true);
+
+		// sprintf(buffer, "Devices found: %d", ds.getNumberOfDevices());
+		// logMQTT("log", buffer);
+
+		// sprintf(buffer, "tempProfile[%d]: %d", currentHour, tempProfile[currentHour]);
+		// logMQTT("log", buffer);
+
+		// sprintf(buffer, "%2.3f", getMATemp());
+		// logMQTT("getMATemp", buffer);
+
+		// sprintf(buffer, "%2.3f", getFibWeighedMA10Temp());
+		// logMQTT("getFibWeighedMA10Temp", buffer);
+
+		// sprintf(buffer, "%2.3f", getWeighedMA5Temp());
+		// logMQTT("getWeighedMA5Temp", buffer);
+
+		sprintf(buffer, "%2.3f", currentTemp);
+		msgMQTT("croco/cave/temperature", buffer);
+
+		currentTemp = getCurrentTemperature();
+
+		// === Controlling 
+		targetTemp = tempProfile[currentHour];
+
+		sprintf(buffer, "%d", targetTemp);
+		msgMQTT("croco/cave/targetTemperature", buffer);
+
+		if (
+			(secSinceValidReading() < TEMP_TTL) && 	// temp reading is still fresh
+			(currentTemp < targetTemp) &&			// Goal is to reach targetTemp
+			(highest < highestAllowedTemp)) {		// Mustn't exceed highest allowed temp at any sensor
+				heaterActivate();
+		} else {
+				heaterDeactivate();
+		}
+
+		if (1 == lightProfile[rtc.getHour(true)]) {
+			lightActivate();
+		} else {
+			lightDeactivate();
+		}
+	}
+}
+
 void loop(void) {
 
 	if (mode & MODE_CONTROL_LOOP) {
 		mode ^= MODE_CONTROL_LOOP;
-		pidControlLoop();
-		lightControlLoop();
+		loopControl();
 	}
 
 	if (mode & MODE_SECONDS_LOOP) {
 		mode ^= MODE_SECONDS_LOOP;
-		probeTemperature();
+		loopSeconds();
 	}
-}
 
-// http://esp32.local/setCredentials?ssid=guesto&password=password123
+	if (mode & MODE_LOG) {
+		mode ^= MODE_LOG;
+		loopLog();
+	}
+
+	if (WiFi.isConnected() && timeClient.update()) {
+		mode |= MODE_TIMESET;
+	}
+
+	// do the most basic down to earth 1 minute loop to self-check:
+	// timers are running
+	// lastValidTemp is fresh
+	// etc.
+}
