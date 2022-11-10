@@ -385,12 +385,9 @@ float probeTemperature() {
 }
 
 float getCurrentTemperature() {
-	if (secSinceValidReading() < TEMP_TTL) {
-		return getFibWeighedMA10Temp();
-	} else {
-		return 99;
-	}
+	return getFibWeighedMA10Temp();
 }
+
 
 void heaterActivate() {
 	if (LOW == heaterState) {
@@ -444,50 +441,47 @@ void timerControlHandler() {
 
 void loopControl() {
 	// Serial.println("loopControl(): called");
-	if (mode & MODE_TIMESET) {
+	int currentHour = rtc.getHour(true);
 
-		int currentHour = rtc.getHour(true);
+	// sprintf(buffer, "Devices found: %d", ds.getNumberOfDevices());
+	// logMQTT("log", buffer);
 
-		// sprintf(buffer, "Devices found: %d", ds.getNumberOfDevices());
-		// logMQTT("log", buffer);
+	// sprintf(buffer, "tempProfile[%d]: %d", currentHour, tempProfile[currentHour]);
+	// logMQTT("log", buffer);
 
-		// sprintf(buffer, "tempProfile[%d]: %d", currentHour, tempProfile[currentHour]);
-		// logMQTT("log", buffer);
+	sprintf(buffer, "%2.3f", getMATemp());
+	logMQTT("getMATemp", buffer);
 
-		// sprintf(buffer, "%2.3f", getMATemp());
-		// logMQTT("getMATemp", buffer);
+	// sprintf(buffer, "%2.3f", getFibWeighedMA10Temp());
+	// logMQTT("getFibWeighedMA10Temp", buffer);
 
-		// sprintf(buffer, "%2.3f", getFibWeighedMA10Temp());
-		// logMQTT("getFibWeighedMA10Temp", buffer);
+	sprintf(buffer, "%2.3f", getWeighedMA5Temp());
+	logMQTT("getWeighedMA5Temp", buffer);
 
-		// sprintf(buffer, "%2.3f", getWeighedMA5Temp());
-		// logMQTT("getWeighedMA5Temp", buffer);
+	sprintf(buffer, "%2.3f", currentTemp);
+	msgMQTT("croco/cave/temperature", buffer);
 
-		sprintf(buffer, "%2.3f", currentTemp);
-		msgMQTT("croco/cave/temperature", buffer);
+	currentTemp = getCurrentTemperature();
 
-		currentTemp = getCurrentTemperature();
+	// === Controlling 
+	targetTemp = tempProfile[currentHour];
 
-		// === Controlling 
-		targetTemp = tempProfile[currentHour];
+	sprintf(buffer, "%d", targetTemp);
+	msgMQTT("croco/cave/targetTemperature", buffer);
 
-		sprintf(buffer, "%d", targetTemp);
-		msgMQTT("croco/cave/targetTemperature", buffer);
+	if (
+		// (secSinceValidReading() < TEMP_TTL) && 	// temp reading is still fresh
+		(currentTemp < targetTemp) &&			// Goal is to reach targetTemp
+		(highest < highestAllowedTemp)) {		// Mustn't exceed highest allowed temp at any sensor
+			heaterActivate();
+	} else {
+			heaterDeactivate();
+	}
 
-		if (
-			(secSinceValidReading() < TEMP_TTL) && 	// temp reading is still fresh
-			(currentTemp < targetTemp) &&			// Goal is to reach targetTemp
-			(highest < highestAllowedTemp)) {		// Mustn't exceed highest allowed temp at any sensor
-				heaterActivate();
-		} else {
-				heaterDeactivate();
-		}
-
-		if (1 == lightProfile[rtc.getHour(true)]) {
-			lightActivate();
-		} else {
-			lightDeactivate();
-		}
+	if (1 == lightProfile[rtc.getHour(true)]) {
+		lightActivate();
+	} else {
+		lightDeactivate();
 	}
 }
 
