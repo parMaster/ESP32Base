@@ -189,7 +189,13 @@ void setup() {
 
 	server.on("/stayPut", HTTP_GET, [](AsyncWebServerRequest *request) {
 		Serial.println("API endpoint for testing purposes. Enjoy!");
+	});
 
+	server.on("/reboot", HTTP_GET, [](AsyncWebServerRequest *request) {
+		Serial.println("Rebooting now");
+		logMQTT("Reboot caused by /reboot API.",".. in 2-3 seconds top");
+		delay(random(2,3)*sec);
+		ESP.restart();
 	});
 
 	// handle GET request to <host>/setCredentials?ssid=<ssid>&password=<password>
@@ -258,6 +264,7 @@ uint16_t logMQTT(const char* topic, const char* message) {
 
 void timerMqttMaintainConnectHandler() {
 	if (WiFi.isConnected() && !mqttClient.connected()) {
+		Serial.println("MQTT reconnect attempt");
 		mqttClient.connect();
 	}
 }
@@ -286,6 +293,12 @@ void loopLog() {
 	logMQTT("freeHeap", buffer);
 	sprintf(buffer, "%ld", secSinceValidReading());
 	logMQTT("sinceLastValidReading", buffer);
+
+	sprintf(buffer, "%d", targetTemp);
+	msgMQTT("croco/cave/targetTemperature", buffer);
+
+	msgMQTT("croco/cave/heater", (LOW == heaterState)?"0":"1");
+	msgMQTT("croco/cave/light", (LOW == lightState)?"0":"1");
 }
 
 
@@ -374,11 +387,10 @@ float probeTemperature() {
 				lastValidReadingTimestamp = rtc.getEpoch();
 			}
 			probes++;
+			// sprintf(buffer, "%2.3f", temp);
+			// sprintf(topicbuf, "%s/p/ds18b20/%d", IDENT, probes);
+			// msgMQTT(topicbuf, buffer);
 		}
-
-		sprintf(topicbuf, "%s/p/ds18b20/%d", IDENT, probes);
-		sprintf(buffer, "%2.3f", temp);
-		msgMQTT(topicbuf, buffer);
 	}
 
 	return (probes > 0);
@@ -441,7 +453,7 @@ void timerControlHandler() {
 
 void loopControl() {
 	// Serial.println("loopControl(): called");
-	int currentHour = rtc.getHour(true);
+	currentTemp = getCurrentTemperature();
 
 	// sprintf(buffer, "Devices found: %d", ds.getNumberOfDevices());
 	// logMQTT("log", buffer);
@@ -449,7 +461,7 @@ void loopControl() {
 	// sprintf(buffer, "tempProfile[%d]: %d", currentHour, tempProfile[currentHour]);
 	// logMQTT("log", buffer);
 
-	sprintf(buffer, "%2.3f", getMATemp());
+	sprintf(buffer, "%2.3f", getMATemp(TEMPH_SIZE));
 	logMQTT("getMATemp", buffer);
 
 	// sprintf(buffer, "%2.3f", getFibWeighedMA10Temp());
@@ -461,13 +473,8 @@ void loopControl() {
 	sprintf(buffer, "%2.3f", currentTemp);
 	msgMQTT("croco/cave/temperature", buffer);
 
-	currentTemp = getCurrentTemperature();
-
 	// === Controlling 
-	targetTemp = tempProfile[currentHour];
-
-	sprintf(buffer, "%d", targetTemp);
-	msgMQTT("croco/cave/targetTemperature", buffer);
+	targetTemp = tempProfile[rtc.getHour(true)];
 
 	if (
 		// (secSinceValidReading() < TEMP_TTL) && 	// temp reading is still fresh
