@@ -1,4 +1,6 @@
+const int TIMEZONE_OFFSET_DST = 3*3600; // GMT+3, Kyiv
 const int TIMEZONE_OFFSET = 2*3600; // GMT+2, Kyiv
+const int TIME_UPDATE_INTERVAL = 10*60; // sec; 10 min
 
 // Soft AP credentials. Available until TIMEOUT_START is reached
 const char *host = "esp32";
@@ -8,7 +10,7 @@ int TIMEOUT_START = 360;
 
 int TIMEOUT_LOG_STATUS = 60; 		// sec; logStatus calling interval
 
-const int TIMEOUT_CONTROL = 5;		// sec; interval for "COMMAND" lop - i.e. PID loop
+const int TIMEOUT_CONTROL = 10;		// sec; interval for "COMMAND" lop - i.e. PID loop
 
 char IDENT[18]; 					// aka MAC address 
 									// M5: ESP32-344E3D8E0D84

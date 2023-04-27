@@ -52,9 +52,6 @@ AsyncWebServer server(80);
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP);
 
-#include <ESP32Time.h>
-ESP32Time rtc;
-
 String ssid = "";
 String password = "";
 
@@ -183,12 +180,19 @@ void setup() {
 	mqttClient.setCredentials(MQTT_USER, MQTT_PASS);
 	mqttClient.setServer(MQTT_HOST, MQTT_PORT);
 
-	server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
-			  { request->redirect("/loginForm"); 
+	server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+		request->redirect("/loginForm");
 	});
 
 	server.on("/stayPut", HTTP_GET, [](AsyncWebServerRequest *request) {
-		Serial.println("API endpoint for testing purposes. Enjoy!");
+		Serial.println("/stayPut called, stopping timerAfterStartup");
+		xTimerStop(timerAfterStartup, 0);
+	});
+
+	server.on("/disconnect", HTTP_GET, [](AsyncWebServerRequest *request) {
+		Serial.println("/disconnect called, disconnecting from WiFi, stopping access point");
+		WiFi.softAPdisconnect(true);
+		WiFi.disconnect(true);
 	});
 
 	server.on("/reboot", HTTP_GET, [](AsyncWebServerRequest *request) {
@@ -214,11 +218,9 @@ void setup() {
 
 			request->send(200, "text/plain", "New credentials set");
 			delay(10*sec);
-			// request->redirect("/");
 			ESP.restart();
 		} else {
 			request->send(200, "text/plain", "empty ssid or password");
-			// request->redirect("/");
 		} 
 	});
 
@@ -242,6 +244,7 @@ void setup() {
 
 	timeClient.begin();
 	timeClient.setTimeOffset(TIMEZONE_OFFSET);
+	timeClient.setUpdateInterval(TIME_UPDATE_INTERVAL);
 }
 
 uint16_t msgMQTT(String topic, String message) {
@@ -276,10 +279,12 @@ void timerLogStatusHandler() {
 void loopLog() {
 	Serial.println("loopLog(): called");
 
+	checkDST();
+
 	// CSV Line
-	// Y-m-d H:m:s ; T lowest; T highest; T moving average; T fib MA 10; T target; heater state; light state
+	// H:m:s ; T lowest; T highest; T moving average; T fib MA 10; T target; heater state; light state
 	sprintf(buffer, "%s; %2.3f; %2.3f; %2.3f; %d; %d; %d", 
-		rtc.getTime("%Y-%m-%d %H:%M:%S").c_str(),
+		timeClient.getFormattedTime().c_str(),
 		highest,
 		getWeighedMA5Temp(),
 		getFibWeighedMA10Temp(),
@@ -288,11 +293,6 @@ void loopLog() {
 		lightState
 	);
 	logMQTT("csvLog", buffer);
-
-	sprintf(buffer, "%d", ESP.getFreeHeap());
-	logMQTT("freeHeap", buffer);
-	sprintf(buffer, "%ld", secSinceValidReading());
-	logMQTT("sinceLastValidReading", buffer);
 
 	sprintf(buffer, "%d", targetTemp);
 	msgMQTT("croco/cave/targetTemperature", buffer);
@@ -311,16 +311,6 @@ bool isTempValid(float temp) {
 		return true;
 	}
 	return false;
-}
-
-// returns number of seconds from last valid temperature reading
-long secSinceValidReading() {
-	if ((lastValidReadingTimestamp != 0) && 
-		(MODE_TIMESET == (mode & MODE_TIMESET))) {
-
-		return rtc.getEpoch() - lastValidReadingTimestamp;
-	}
-	return LONG_MAX;
 }
 
 // getWeighedMA5Temp - returns moving average temperature based on 5 last readings
@@ -383,9 +373,6 @@ float probeTemperature() {
 				highest = temp;
 			}
 
-			if (MODE_TIMESET == (mode & MODE_TIMESET)) {
-				lastValidReadingTimestamp = rtc.getEpoch();
-			}
 			probes++;
 			// sprintf(buffer, "%2.3f", temp);
 			// sprintf(topicbuf, "%s/p/ds18b20/%d", IDENT, probes);
@@ -442,9 +429,7 @@ void timerSecondsHandler() {
 }
 
 void loopSeconds() {
-	rtc.setTime(timeClient.getEpochTime());
 	probeTemperature();
-	Serial.println(rtc.getTime("%Y-%m-%d %H:%M:%S").c_str());
 }
 
 void timerControlHandler() {
@@ -474,7 +459,7 @@ void loopControl() {
 	msgMQTT("croco/cave/temperature", buffer);
 
 	// === Controlling 
-	targetTemp = tempProfile[rtc.getHour(true)];
+	targetTemp = tempProfile[timeClient.getHours()];
 
 	if (
 		// (secSinceValidReading() < TEMP_TTL) && 	// temp reading is still fresh
@@ -485,10 +470,30 @@ void loopControl() {
 			heaterDeactivate();
 	}
 
-	if (1 == lightProfile[rtc.getHour(true)]) {
+	if (1 == lightProfile[timeClient.getHours()]) {
 		lightActivate();
 	} else {
 		lightDeactivate();
+	}
+}
+
+// switch timeClient to TIMEZONE_OFFSET_DST if DST is in effect
+void checkDST() {
+	if (!timeClient.update()) {
+		Serial.println("Failed to obtain time");
+		return;
+	}
+	long epoch = timeClient.getEpochTime();
+	// get month and day of month from epoch
+	int month = (int) (epoch / 2629743) % 12 + 1;
+	int day = (int) (epoch / 86400) % 31 + 1;
+
+	// if month and day of month correspond to DST in effect, switch to DST
+	if ((month > 3 && month < 10) ||
+		(month == 3 && day >= 25) ||
+		(month == 10 && day < 29)) {
+		// DST is in effect
+		timeClient.setTimeOffset(TIMEZONE_OFFSET_DST);
 	}
 }
 
